@@ -1863,13 +1863,16 @@ layer("ProviderEventIngestorV2", (it) => {
   );
 
   it.effect.each([
-    { parentMoved: false, failure: null },
-    { parentMoved: true, failure: null },
-    { parentMoved: false, failure: "write" },
-    { parentMoved: false, failure: "git" },
+    { parentMoved: false, failure: null, mutation: null },
+    { parentMoved: true, failure: null, mutation: null },
+    { parentMoved: false, failure: "write", mutation: null },
+    { parentMoved: false, failure: "git", mutation: null },
+    { parentMoved: false, failure: null, mutation: "metadata" },
+    { parentMoved: false, failure: null, mutation: "provider" },
+    { parentMoved: false, failure: null, mutation: "workspace" },
   ])(
     "rechecks a pending native child's branch after the rename scan: %j",
-    ({ parentMoved, failure }) =>
+    ({ parentMoved, failure, mutation }) =>
       Effect.gen(function* () {
         const { worktreePath, command } = yield* makeSharedWorktree;
         const git = yield* GitVcsDriver.GitVcsDriver;
@@ -1887,25 +1890,70 @@ layer("ProviderEventIngestorV2", (it) => {
         yield* eventSink.write({ events: [{ ...rootEvent, payload: parent }] });
         const childId = ids.derive.threadFromProviderThread({
           driver: CODEX_DRIVER,
-          nativeThreadId: `child-created-during-rename:${parentMoved}:${failure}`,
+          nativeThreadId: `child-created-during-rename:${parentMoved}:${failure}:${mutation}`,
         });
         const beforeCommit = yield* Deferred.make<
           void,
           ProviderEventIngestor.ProviderEventIngestorV2Error
         >();
         const allowCommit = yield* Deferred.make<void>();
+        const attachedProviderId = ids.derive.providerThread({
+          driver: CODEX_DRIVER,
+          nativeThreadId: "attached-during-branch-correction",
+        });
         let correctionWrites = 0;
         const gatedSink = EventSink.EventSinkV2.of({
           ...eventSink,
           write: (input) => {
             if (
               input.events.some(
-                (event) => event.type === "thread.metadata-updated" && event.threadId === childId,
+                (event) => event.type === "thread.branch-reconciled" && event.threadId === childId,
               )
             ) {
               correctionWrites++;
               if (failure === "write" && correctionWrites === 1)
                 return Effect.fail(new EventSink.EventSinkWriteError({ eventCount: 1 }));
+              if (mutation === "provider")
+                return Effect.gen(function* () {
+                  // Attach after the ingestor's final getThread, before its
+                  // correction commits: the command lock cannot prevent this.
+                  yield* eventSink.write({
+                    events: [
+                      {
+                        id: yield* ids.allocate.event({ threadId: childId }),
+                        type: "provider-thread.updated",
+                        threadId: childId,
+                        occurredAt: now,
+                        payload: {
+                          id: attachedProviderId,
+                          driver: CODEX_DRIVER,
+                          providerInstanceId: modelSelection.instanceId,
+                          providerSessionId: null,
+                          appThreadId: childId,
+                          ownerNodeId: null,
+                          nativeThreadRef: null,
+                          nativeConversationHeadRef: null,
+                          status: "idle",
+                          firstRunOrdinal: null,
+                          lastRunOrdinal: null,
+                          handoffIds: [],
+                          forkedFrom: null,
+                          createdAt: now,
+                          updatedAt: now,
+                        },
+                      },
+                    ],
+                  });
+                  assert.equal(
+                    (yield* projections.getThread(childId)).activeProviderThreadId,
+                    attachedProviderId,
+                  );
+                  return yield* eventSink.write(input);
+                }).pipe(
+                  Effect.mapError(
+                    (cause) => new EventSink.EventSinkWriteError({ eventCount: 1, cause }),
+                  ),
+                );
             }
             return input.events.some(
               (event) => event.type === "thread.created" && event.threadId === childId,
@@ -1932,7 +1980,32 @@ layer("ProviderEventIngestorV2", (it) => {
                       detail: "Read failed",
                     }),
                   )
-                : git.resolveBranchName(cwd, refName),
+                : Effect.gen(function* () {
+                    // Creation has committed, but branch reconciliation is still
+                    // reading Git. Simulate another committed metadata update.
+                    if (mutation !== null) {
+                      const current = yield* projections.getThread(childId);
+                      yield* eventSink.write({
+                        events: [
+                          {
+                            id: yield* ids.allocate.event({ threadId: childId }),
+                            type: "thread.metadata-updated",
+                            threadId: childId,
+                            occurredAt: now,
+                            payload: {
+                              ...current,
+                              title: "Renamed child",
+                              archivedAt: now,
+                              ...(mutation === "workspace"
+                                ? { branch: "user/checkout", worktreePath: `${worktreePath}-moved` }
+                                : {}),
+                            },
+                          },
+                        ],
+                      });
+                    }
+                    return yield* git.resolveBranchName(cwd, refName);
+                  }),
           }),
         );
         const providerSessionId = yield* ids.allocate.providerSession({
@@ -1988,10 +2061,32 @@ layer("ProviderEventIngestorV2", (it) => {
         const stored = yield* Fiber.join(creation);
         assert.equal(stored[0]?.event.type, "thread.created");
         const child = yield* projections.getThread(childId);
-        assert.equal(child.branch, failure === null ? "generated-branch" : parent.branch);
-        assert.equal(child.worktreePath, parent.worktreePath);
-        assert.equal(correctionWrites, failure === "git" ? 0 : 1);
-        assert.deepEqual(yield* ingestor.ingestNormalized(creationInput), []);
+        assert.equal(
+          child.branch,
+          mutation === "workspace"
+            ? "user/checkout"
+            : failure === null
+              ? "generated-branch"
+              : parent.branch,
+        );
+        assert.equal(
+          child.worktreePath,
+          mutation === "workspace" ? `${worktreePath}-moved` : parent.worktreePath,
+        );
+        if (mutation !== null) {
+          assert.equal(child.title, "Renamed child");
+          assert.deepEqual(child.archivedAt, now);
+        }
+        if (mutation === "provider") {
+          assert.equal(child.activeProviderThreadId, attachedProviderId);
+          const projection = yield* projections.getThreadProjection(childId);
+          assert.isTrue(
+            projection.providerThreads.some((provider) => provider.id === attachedProviderId),
+          );
+        }
+        assert.equal(correctionWrites, failure === "git" || mutation === "workspace" ? 0 : 1);
+        if (mutation === null)
+          assert.deepEqual(yield* ingestor.ingestNormalized(creationInput), []);
       }),
   );
 

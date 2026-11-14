@@ -40,6 +40,8 @@ import * as WorkspacePaths from "../workspace/WorkspacePaths.ts";
 export interface ProjectCreateInput extends ProjectCreatePayload {
   readonly commandId: CommandId;
   readonly projectId: ProjectId;
+  /** Clone placeholders must stay empty until git clone runs. Internal only. */
+  readonly initializeNewWorkspaceWithRift?: boolean;
 }
 
 export interface ProjectUpdateInput extends ProjectUpdatePayload {
@@ -227,10 +229,12 @@ export const make = Effect.gen(function* () {
     readonly projectId?: ProjectId;
     readonly workspaceRoot: string;
     readonly createIfMissing?: boolean;
+    readonly initializeNewWorkspaceWithRift?: boolean;
   }) =>
     workspacePaths
       .normalizeWorkspaceRoot(input.workspaceRoot, {
         createIfMissing: input.createIfMissing ?? false,
+        initializeWithRift: input.initializeNewWorkspaceWithRift ?? true,
       })
       .pipe(
         Effect.mapError(
@@ -382,6 +386,9 @@ export const make = Effect.gen(function* () {
         projectId: input.projectId,
         workspaceRoot: input.workspaceRoot,
         createIfMissing: input.createWorkspaceRootIfMissing ?? false,
+        ...(input.initializeNewWorkspaceWithRift === undefined
+          ? {}
+          : { initializeNewWorkspaceWithRift: input.initializeNewWorkspaceWithRift }),
       });
       yield* commit({
         type: "project.create",

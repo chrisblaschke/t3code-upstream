@@ -24,7 +24,12 @@ function lastPiResponseData(transcript: ProviderReplayTranscript, command: strin
   return field(frame, "data");
 }
 
-/** Settled Pi usage uses each recorded get_session_stats response in order, not the last streaming total. */
+/**
+ * Pi reports usage only through `get_session_stats`, read once per settled
+ * turn: each completed provider turn carries the stats response recorded for
+ * it, in order, not the last live streaming total, plus Pi's auto-compaction
+ * point for the model.
+ */
 export function assertPiSettledTokenUsage(
   result: OrchestratorV2ScenarioResult,
   transcript: ProviderReplayTranscript,
@@ -45,6 +50,9 @@ export function assertPiSettledTokenUsage(
     assert.deepEqual(tokenUsage, {
       usedTokens: field(contextUsage, "tokens"),
       maxTokens: field(contextUsage, "contextWindow"),
+      // Where Pi compacts on its own: the window less Pi's default 16,384-token
+      // reserve, since replay runs against an empty agent dir.
+      autoCompactThreshold: (field(contextUsage, "contextWindow") as number) - 16_384,
       inputTokens: field(tokens, "input"),
       cachedInputTokens: field(tokens, "cacheRead"),
       outputTokens: field(tokens, "output"),

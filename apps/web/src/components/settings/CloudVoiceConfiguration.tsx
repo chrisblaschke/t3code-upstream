@@ -416,19 +416,24 @@ export function CloudVoiceConfiguration({
           </p>
         )}
         <DialogFooter>
-          {connected && canManage && saved && (active || routed) && !remove && (
-            <div className="sm:mr-auto">
-              <Button
-                type="button"
-                size="sm"
-                variant="ghost"
-                disabled={busy}
-                onClick={() => setRemove(true)}
-              >
-                Remove key…
-              </Button>
-            </div>
-          )}
+          {connected &&
+            canManage &&
+            saved &&
+            (provider !== "xai" || Boolean(existing)) &&
+            (active || routed) &&
+            !remove && (
+              <div className="sm:mr-auto">
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="ghost"
+                  disabled={busy}
+                  onClick={() => setRemove(true)}
+                >
+                  Remove key…
+                </Button>
+              </div>
+            )}
           <Button type="button" size="sm" variant="outline" disabled={busy} onClick={close}>
             Cancel
           </Button>

@@ -91,6 +91,8 @@ import {
   workEntryViewedImagePath,
 } from "@t3tools/client-runtime/work-log/presentation";
 import { notificationChildThreadId } from "@t3tools/client-runtime/state/thread-execution";
+import { terminalOutputKind } from "@t3tools/client-runtime/work-log/terminal-output";
+import { TerminalOutputPreview } from "./TerminalOutputPreview";
 import type { MarkdownImageRenderer } from "../../native/SelectableMarkdownText";
 import type { FilePreviewSource } from "../../components/ui/FilePreviewModal";
 import { FilePreviewGallery } from "../../components/ui/FilePreviewGallery";
@@ -1017,6 +1019,7 @@ const ThreadWorkLogRow = function ThreadWorkLogRow(
         exit {failedExitCode}
       </Text>
     );
+  const terminalKind = row.terminalOutput ? terminalOutputKind(row.projectedItem.item) : null;
   const toolPresentation = resolveWorkEntryToolPresentation(row.workEntry);
   const previewText = row.groupStandIn?.label ?? workEntryRowLabel(row.workEntry);
   const answerPreview = row.workEntry.questionAnswer
@@ -1309,6 +1312,19 @@ const ThreadWorkLogRow = function ThreadWorkLogRow(
             </>
           ) : null}
         </Animated.View>
+      ) : null}
+      {row.terminalOutput && !expanded && viewedImagePath ? (
+        <View className="ml-7 pb-1.5">
+          {props.renderImage({ href: viewedImagePath, alt: null, title: null })}
+        </View>
+      ) : null}
+      {terminalKind ? (
+        <TerminalOutputPreview
+          environmentId={props.environmentId}
+          item={row.projectedItem.item}
+          kind={terminalKind}
+          onPressPreview={props.onPressPreview}
+        />
       ) : null}
     </Animated.View>
   );

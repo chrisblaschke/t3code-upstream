@@ -47,6 +47,7 @@ import { projectThreadAwarenessV2 } from "@t3tools/shared/agentAwareness";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import { CodexProviderCapabilitiesV2 } from "./Adapters/CodexAdapterV2.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
+import { waitForOwnedWork } from "./testing/waitForOwnedWork.ts";
 import {
   buildBoundedThreadProjection,
   decodeThreadHistoryCursor,
@@ -2648,6 +2649,213 @@ it.effect("lists every thread in the shell snapshot past SQLite's bound variable
 );
 
 it.layer(layerTest)("ProjectionStoreV2", (it) => {
+  it.effect("rehydrates an empty roster before notification without settling its owner", () =>
+    Effect.gen(function* () {
+      const store = yield* ProjectionStore.ProjectionStoreV2;
+      const threadId = yield* addRolledBackRecoveryCandidate("empty-roster-wake");
+      const original = (yield* store.getThreadRecords(threadId, ["runs"])).runs[0]!;
+      const now = yield* DateTime.now;
+      const providerThreadId = ProviderThreadId.make("provider:empty-roster-wake");
+      const run = {
+        ...original,
+        status: "completed" as const,
+        startedAt: now,
+        completedAt: now,
+        providerThreadId,
+      };
+      yield* store.apply({
+        id: EventId.make("event:empty-owner-a"),
+        type: "run.updated",
+        threadId,
+        occurredAt: now,
+        payload: run,
+      });
+      const unrelated = { ...run, id: RunId.make("run:empty-owner-b"), ordinal: 2 };
+      yield* store.apply({
+        id: EventId.make("event:empty-owner-b"),
+        type: "run.created",
+        threadId,
+        occurredAt: now,
+        payload: unrelated,
+      });
+      const providerThread: OrchestrationV2ProviderThread = {
+        id: providerThreadId,
+        driver,
+        providerInstanceId,
+        providerSessionId: null,
+        appThreadId: threadId,
+        ownerNodeId: null,
+        nativeThreadRef: null,
+        nativeConversationHeadRef: null,
+        status: "idle",
+        firstRunOrdinal: 1,
+        lastRunOrdinal: 2,
+        handoffIds: [],
+        forkedFrom: null,
+        createdAt: now,
+        updatedAt: now,
+        pendingBackgroundTasks: [],
+        pendingBackgroundTaskWakes: [{ taskId: "removed-a", kind: "command", originRunId: run.id }],
+      };
+      yield* store.apply({
+        id: EventId.make("event:empty-owned-roster"),
+        type: "provider-thread.updated",
+        threadId,
+        driver,
+        providerInstanceId,
+        occurredAt: now,
+        payload: providerThread,
+      });
+      const rehydrated = yield* Effect.gen(function* () {
+        const fresh = yield* ProjectionStore.ProjectionStoreV2;
+        return yield* fresh.getThreadRecords(threadId, [
+          "runs",
+          "messages",
+          "providerThreads",
+          "subagents",
+        ]);
+      }).pipe(Effect.provide(ProjectionStore.layer));
+      assert.deepEqual(rehydrated.providerThreads[0]?.pendingBackgroundTasks, []);
+      assert.lengthOf(rehydrated.messages, 0);
+      assert.isTrue((yield* waitForOwnedWork(rehydrated, run.id)).timedOut);
+      assert.equal(
+        rehydrated.providerThreads[0]?.pendingBackgroundTaskWakes?.[0]?.originRunId,
+        run.id,
+      );
+      assert.isFalse((yield* waitForOwnedWork(rehydrated, unrelated.id)).timedOut);
+      // A confirmed dead process / cancelled workflow can explicitly discharge the obligation.
+      yield* store.apply({
+        id: EventId.make("event:empty-no-wake-owed"),
+        type: "provider-thread.updated",
+        threadId,
+        driver,
+        providerInstanceId,
+        occurredAt: now,
+        payload: { ...providerThread, pendingBackgroundTaskWakes: [] },
+      });
+      assert.isFalse(
+        (yield* waitForOwnedWork(
+          yield* store.getThreadRecords(threadId, [
+            "runs",
+            "messages",
+            "providerThreads",
+            "subagents",
+          ]),
+          run.id,
+        )).timedOut,
+      );
+    }),
+  );
+
+  it.effect("rehydrates background and queued completion ownership across an interleaved run", () =>
+    Effect.gen(function* () {
+      const store = yield* ProjectionStore.ProjectionStoreV2;
+      const threadId = yield* addRolledBackRecoveryCandidate("wake-ownership");
+      const original = (yield* store.getThreadRecords(threadId, ["runs"])).runs[0]!;
+      const now = yield* DateTime.now;
+      const taskId = NodeId.make("task:wake-ownership");
+      const messageId = MessageId.make("message:wake-ownership");
+      const providerThreadId = ProviderThreadId.make("provider:wake-ownership");
+      const run = {
+        ...original,
+        status: "completed" as const,
+        providerThreadId,
+        delegatedCompletion: {
+          disposition: "open" as const,
+          nextGeneration: 2,
+          delivery: { generation: 1, messageId, taskIds: [taskId] },
+        },
+      };
+      yield* store.apply({
+        id: EventId.make("event:owner-a"),
+        type: "run.updated",
+        threadId,
+        occurredAt: now,
+        payload: run,
+      });
+      yield* store.apply({
+        id: EventId.make("event:owner-b"),
+        type: "run.created",
+        threadId,
+        occurredAt: now,
+        payload: {
+          ...run,
+          id: RunId.make("run:owner-b"),
+          ordinal: 2,
+          delegatedCompletion: undefined,
+        },
+      });
+      yield* store.apply({
+        id: EventId.make("event:owned-roster"),
+        type: "provider-thread.updated",
+        threadId,
+        occurredAt: now,
+        driver,
+        providerInstanceId,
+        payload: {
+          id: providerThreadId,
+          driver,
+          providerInstanceId,
+          providerSessionId: null,
+          appThreadId: threadId,
+          ownerNodeId: null,
+          nativeThreadRef: null,
+          nativeConversationHeadRef: null,
+          status: "idle",
+          firstRunOrdinal: 1,
+          lastRunOrdinal: 2,
+          handoffIds: [],
+          forkedFrom: null,
+          createdAt: now,
+          updatedAt: now,
+          pendingBackgroundTasks: [
+            { taskId: "opaque", kind: "background_task", originRunId: run.id },
+          ],
+        },
+      });
+      yield* store.apply({
+        id: EventId.make("event:owned-wake-message"),
+        type: "message.updated",
+        threadId,
+        occurredAt: now,
+        payload: {
+          id: messageId,
+          threadId,
+          runId: null,
+          nodeId: null,
+          role: "user",
+          text: "Work completed",
+          createdBy: "agent",
+          creationSource: "server",
+          attachments: [],
+          streaming: false,
+          createdAt: now,
+          updatedAt: now,
+          delegatedCompletion: { parentRunId: run.id, generation: 1, taskIds: [taskId] },
+          notification: {
+            originRunIds: [run.id],
+            source: { kind: "background_task" },
+            outcome: "completed",
+            summary: "Work completed",
+          },
+        },
+      });
+      // A fresh service must decode this from persisted projection rows, not
+      // an in-memory producer map or the most recently active run.
+      const rehydrated = yield* Effect.gen(function* () {
+        const fresh = yield* ProjectionStore.ProjectionStoreV2;
+        return yield* fresh.getThreadRecords(threadId, ["runs", "messages", "providerThreads"]);
+      }).pipe(Effect.provide(ProjectionStore.layer));
+      assert.equal(rehydrated.providerThreads[0]?.pendingBackgroundTasks?.[0]?.originRunId, run.id);
+      assert.deepEqual(rehydrated.messages[0]?.notification?.originRunIds, [run.id]);
+      assert.equal(rehydrated.messages[0]?.delegatedCompletion?.parentRunId, run.id);
+      assert.equal(
+        rehydrated.runs.find((entry) => entry.id === run.id)?.delegatedCompletion?.delivery
+          ?.messageId,
+        messageId,
+      );
+    }),
+  );
   // regression: #21969 keep corrupt plan JSON in the typed read error
   it.effect("returns a typed read error for malformed stored plan JSON", () =>
     Effect.gen(function* () {

@@ -52,6 +52,8 @@ export interface TimelineRowSharedState {
   citationRequest: AssistantCitationTarget | null;
   listRef: React.RefObject<LegendListRef | null>;
   timestampFormat: TimestampFormat;
+  /** Terminal transcript: rows show their output, image and thinking inline. */
+  terminalTranscript: boolean;
   routeThreadKey: string;
   threadRef: ScopedThreadRef | null;
   markdownCwd: string | undefined;
@@ -64,6 +66,8 @@ export interface TimelineRowSharedState {
   onUseArtifactTemplate: (template: CodexArtifactTemplate) => void;
   onSendAppMessage: ((text: string) => Promise<void>) | undefined;
   onAppFullscreenChange: (rowId: string, fullscreen: boolean) => void;
+  /** A page resized while the reader is in it: hold that row in place instead of following the end. */
+  onAppReaderResize: (rowId: string) => void;
   onRunShellCommand: ((command: string) => void) | undefined;
   findActive: boolean;
   onImageExpand: (preview: ExpandedImagePreview) => void;

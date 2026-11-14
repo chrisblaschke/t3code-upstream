@@ -846,6 +846,11 @@ export function applyToProjection(
   };
 
   switch (event.type) {
+    case "thread.branch-reconciled":
+      return projection.thread.branch === event.payload.expectedBranch &&
+        projection.thread.worktreePath === event.payload.worktreePath
+        ? { ...base, thread: { ...projection.thread, branch: event.payload.branch } }
+        : projection;
     case "thread.pull-request-link-updated":
       return {
         ...projection,
@@ -2065,6 +2070,18 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
       Effect.fnUntraced(
         function* (event) {
           switch (event.type) {
+            case "thread.branch-reconciled": {
+              // A provider can attach between the ingestor's read and this write.
+              // Never replay its thread snapshot; guard and change only the branch.
+              yield* sql`
+                UPDATE orchestration_v2_projection_threads
+                SET payload_json = json_set(payload_json, '$.branch', ${event.payload.branch})
+                WHERE thread_id = ${event.threadId}
+                  AND json_extract(payload_json, '$.branch') IS ${event.payload.expectedBranch}
+                  AND json_extract(payload_json, '$.worktreePath') = ${event.payload.worktreePath}
+              `;
+              break;
+            }
             case "thread.pull-request-link-updated": {
               const thread = yield* getThread(event.threadId);
               yield* apply({
@@ -2908,6 +2925,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
             event.type !== "thread.visited" &&
             event.type !== "thread.marked-unread" &&
             event.type !== "thread.metadata-updated" &&
+            event.type !== "thread.branch-reconciled" &&
             event.type !== "thread.pull-request-synced" &&
             event.type !== "thread.pull-request-link-updated" &&
             event.type !== "thread.runtime-mode-updated" &&

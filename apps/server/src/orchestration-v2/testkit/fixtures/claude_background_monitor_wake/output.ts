@@ -38,6 +38,7 @@ export function assertClaudeBackgroundMonitorWakeOutput(
   for (const task of rosterTasks.slice(1)) {
     assert.deepEqual(task, {
       taskId: MONITOR_TASK_ID,
+      originRunId: projection.runs[0]?.id,
       description: "Background monitor test",
       kind: "monitor",
     });

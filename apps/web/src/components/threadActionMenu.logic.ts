@@ -4,6 +4,7 @@ import type { SnoozePreset } from "@t3tools/client-runtime/state/thread-settled"
 export type ThreadActionMenuId =
   | "find"
   | "new-thread-on-branch"
+  | "open-pi-terminal"
   | "filter-by-project"
   | "turn-into-project"
   | "project-settings"
@@ -71,6 +72,8 @@ export interface ThreadActionMenuState {
   readonly canOperate: boolean;
   readonly canFind?: boolean;
   readonly branch: string | null;
+  /** A Pi thread with a session file the Pi TUI can open. */
+  readonly canOpenPiTerminal?: boolean;
   readonly projectFilter: {
     readonly label: string;
     readonly isActive: boolean;
@@ -101,6 +104,8 @@ export interface ThreadActionMenuState {
 export function threadActionRequiresOperate(action: ThreadActionMenuId): boolean {
   return ![
     "find",
+    // The launch callback enforces terminal:operate, not orchestration:operate.
+    "open-pi-terminal",
     "new-thread-on-branch",
     "project-settings",
     "mark-unread",
@@ -119,6 +124,15 @@ export function buildThreadActionMenuItems(
   const items: ReadonlyArray<ContextMenuItem<ThreadActionMenuId>> = [
     ...(state.canFind
       ? [{ id: "find" as const, label: "Find in thread", icon: "text-search" }]
+      : []),
+    ...(state.canOpenPiTerminal
+      ? [
+          {
+            id: "open-pi-terminal" as const,
+            label: "Open in Pi terminal",
+            icon: "square-terminal",
+          },
+        ]
       : []),
     ...(state.branch
       ? [

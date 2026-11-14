@@ -103,7 +103,7 @@ import { readEnvironmentScope, useEnvironmentScope } from "../../state/session";
 const SHORT_DRAFT_VIEWPORT_HEIGHT = 380;
 
 function NewTaskWorkspaceIcon(props: {
-  readonly workspaceMode: "local" | "worktree";
+  readonly workspaceMode: "local" | "worktree" | "rift";
   readonly worktreePath: string | null;
   readonly size: number;
 }) {
@@ -598,7 +598,7 @@ export function NewTaskDraftScreen(props: {
       !modelSelection ||
       (initialMessageText.length === 0 && draft.attachments.length === 0) ||
       flow.submitting ||
-      (workspaceMode === "worktree" && !selectedBranchName)
+      (workspaceMode !== "local" && !selectedBranchName)
     ) {
       return null;
     }
@@ -699,7 +699,7 @@ export function NewTaskDraftScreen(props: {
         ? "Wait for the project clone to finish."
         : flow.submitting
           ? "Starting the thread…"
-          : flow.workspaceMode === "worktree" && (!flow.selectedBranchName || !flow.isGitRepoKnown)
+          : flow.workspaceMode !== "local" && (!flow.selectedBranchName || !flow.isGitRepoKnown)
             ? "Choose a base branch before creating a worktree."
             : null
       : "Wait for shared content to finish importing.";
@@ -866,7 +866,7 @@ export function NewTaskDraftScreen(props: {
   const workspaceControls = (
     <View className="flex-row items-center gap-1 px-2">
       <ComposerInlineControl
-        accessibilityHint={`Switches to ${flow.workspaceMode === "local" ? "a new worktree" : "the current checkout"}`}
+        accessibilityHint="Cycles between the current checkout, a new worktree, and a Rift copy"
         accessibilityLabel={workspaceLabel}
         disabled={isComposerInteractionLocked || !flow.isGitRepo}
         renderIcon={(size) => (
@@ -878,7 +878,15 @@ export function NewTaskDraftScreen(props: {
         )}
         label={workspaceLabel}
         maxWidth="100%"
-        onPress={() => flow.setWorkspaceMode(flow.workspaceMode === "local" ? "worktree" : "local")}
+        onPress={() =>
+          flow.setWorkspaceMode(
+            flow.workspaceMode === "local"
+              ? "worktree"
+              : flow.workspaceMode === "worktree"
+                ? "rift"
+                : "local",
+          )
+        }
         showChevron={false}
       />
 
@@ -886,7 +894,7 @@ export function NewTaskDraftScreen(props: {
         <ComposerInlineControl
           accessibilityLabel={`${flow.workspaceMode === "worktree" ? "Base branch" : "Branch"}: ${selectedBranchLabel}`}
           chevronDirection="right"
-          disabled={isComposerInteractionLocked || !flow.isGitRepo}
+          disabled={isComposerInteractionLocked || !flow.isGitRepo || flow.workspaceMode === "rift"}
           icon="arrow.triangle.branch"
           label={showBranchLoading ? "Loading branches…" : selectedBranchLabel}
           maxWidth="100%"

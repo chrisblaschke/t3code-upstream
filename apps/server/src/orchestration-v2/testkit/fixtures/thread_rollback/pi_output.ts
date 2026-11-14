@@ -37,8 +37,27 @@ export function assertPiThreadRollbackOutput(
     runCount: 3,
     runStatuses: ["completed", "rolled_back", "completed"],
   });
-  const projection = projectionFor(result, transcript.scenario);
-  assertSemanticProjectionIntegrity(projection);
+  const projected = projectionFor(result, transcript.scenario);
+  assertSemanticProjectionIntegrity(projected);
+  // Each Pi `notify` (here the T3 MCP extension warning, recorded without T3's
+  // MCP env) shows as a notice, including those Pi sends between turns, which
+  // the next turn carries. The turn shape below is about everything else.
+  const notifyMessages = transcript.entries.flatMap((entry) =>
+    entry.type === "emit_inbound" &&
+    field(entry.frame, "type") === "extension_ui_request" &&
+    field(entry.frame, "method") === "notify"
+      ? [field(entry.frame, "message")]
+      : [],
+  );
+  const notices = projected.turnItems.filter(
+    (item) => item.type === "system_notice" && notifyMessages.includes(item.message),
+  );
+  assert.lengthOf(notices, notifyMessages.length);
+  const projection = {
+    ...projected,
+    turnItems: projected.turnItems.filter((item) => !notices.includes(item)),
+    visibleTurnItems: projected.visibleTurnItems.filter((row) => !notices.includes(row.item)),
+  };
   assertRunOrdinals(projection, [1, 2, 3]);
   const turn = ["user_message", "reasoning", "assistant_message", "checkpoint"] as const;
   assertTurnItemTypeSequence(projection, [...turn, ...turn, ...turn]);

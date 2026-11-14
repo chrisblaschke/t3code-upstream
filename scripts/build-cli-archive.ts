@@ -645,8 +645,14 @@ const buildCliArchive = Effect.fn("buildCliArchive")(function* (input: {
   });
 
   const executablePath = path.join(contentDir, executableName);
-  if (input.platform === "linux") {
+  // Fork: the Mac cross-builds Linux archives, and ldd/dpkg/patchelf are Linux-only. Our Linux
+  // hosts have libatomic1 installed, so a cross-built t3 links the system copy.
+  if (input.platform === "linux" && hostPlatform === "linux") {
     yield* bundleLinuxLibatomic({ repoRoot, contentDir, executablePath });
+  } else if (input.platform === "linux") {
+    yield* Effect.logWarning(
+      `[cli-archive] Cross-building on ${hostPlatform}: libatomic.so.1 not bundled; Linux hosts need libatomic1.`,
+    );
   }
   // TEMPORARY one-time Node fix. Remove when fixed: https://github.com/nodejs/node/issues/67048
   if (input.platform === "linux" && input.arch === "arm64") {

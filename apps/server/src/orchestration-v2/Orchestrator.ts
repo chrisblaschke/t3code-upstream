@@ -850,7 +850,7 @@ function delegatedTaskTerminalStatus(
   }
 }
 
-/** Failed worktree setup keeps the queue held so queued messages cannot start in the project checkout. */
+/** Failed workspace setup keeps the queue held so queued messages cannot start in the project checkout. */
 function worktreeSetupPending(
   projection: Pick<OrchestrationV2ThreadProjection, "thread" | "runs">,
 ): boolean {
@@ -859,7 +859,8 @@ function worktreeSetupPending(
     projection.runs.some(
       (run) =>
         (run.status === "failed" || run.status === "interrupted") &&
-        run.workspacePreparation?.type === "worktree",
+        (run.workspacePreparation?.type === "worktree" ||
+          run.workspacePreparation?.type === "rift"),
     )
   );
 }
@@ -2057,7 +2058,8 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           : undefined;
       const worktreeMissing =
         failedRun?.id === options?.endedRunId &&
-        failedRun?.workspacePreparation?.type === "worktree" &&
+        (failedRun?.workspacePreparation?.type === "worktree" ||
+          failedRun?.workspacePreparation?.type === "rift") &&
         projection.thread.worktreePath === null;
       const settings = yield* serverSettings.getSettings.pipe(Effect.orDie);
       const projectOverride =
@@ -6566,7 +6568,8 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       activeRun === undefined &&
       dispatchMode.type === "queue_after_active" &&
       (latestRun?.status === "failed" || latestRun?.status === "interrupted") &&
-      latestRun.workspacePreparation?.type === "worktree" &&
+      (latestRun.workspacePreparation?.type === "worktree" ||
+        latestRun.workspacePreparation?.type === "rift") &&
       projection.thread.worktreePath === null
         ? latestRun
         : undefined;
@@ -11212,7 +11215,11 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       }
     }
     for (const providerThread of input.projection.providerThreads) {
-      if ((providerThread.pendingBackgroundTasks?.length ?? 0) === 0) continue;
+      if (
+        (providerThread.pendingBackgroundTasks?.length ?? 0) === 0 &&
+        (providerThread.pendingBackgroundTaskWakes?.length ?? 0) === 0
+      )
+        continue;
       if (providerThread.id === input.stoppedProviderThreadId) {
         // A refused newer start can take ownership and reject the stopped
         // turn's roster clear. Reconcile it without hiding surviving work.
@@ -11235,6 +11242,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
               ? "idle"
               : providerThread.status,
           pendingBackgroundTasks: [],
+          pendingBackgroundTaskWakes: [],
           updatedAt: input.now,
         },
       });
@@ -13411,6 +13419,33 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
 
       if (completionPlan.offer && completionPlan.parentRun !== undefined) {
         yield* offerDelegatedCompletionDelivery(parentThreadId, completionPlan.parentRun.id);
+      }
+      // A result held because its cohort's wake already started a turn would wait for that whole
+      // turn. The turn took the wake's text, so accept it like a steer; this result then steers in.
+      const heldDelivery = parentRun?.delegatedCompletion?.delivery;
+      const heldDeliveryRun = completionDeliveryRun(parentProjection, heldDelivery);
+      if (
+        completionPlan.task.completionDelivery?.state === "pending" &&
+        heldDelivery != null &&
+        heldDeliveryRun?.userMessageId === heldDelivery.messageId &&
+        (heldDeliveryRun.status === "running" || heldDeliveryRun.status === "waiting")
+      ) {
+        yield* dispatchWithReceiptEffect({
+          type: "notification.delivery.accept",
+          commandId: CommandId.make(
+            `command:wake-turn-accepted:${heldDelivery.messageId}:${task.id}`,
+          ),
+          threadId: parentThreadId,
+          messageId: heldDelivery.messageId,
+        }).pipe(
+          Effect.catchCause((cause) =>
+            Effect.logWarning("Failed to accept a running wake turn for a held result", {
+              parentThreadId,
+              taskId: task.id,
+              cause,
+            }),
+          ),
+        );
       }
     },
   );

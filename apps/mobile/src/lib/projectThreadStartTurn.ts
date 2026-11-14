@@ -30,7 +30,7 @@ export interface ProjectThreadStartTurnSpec {
   readonly modelSelection: ModelSelection;
   readonly runtimeMode: RuntimeMode;
   readonly interactionMode: ProviderInteractionMode;
-  readonly workspaceMode: "local" | "worktree";
+  readonly workspaceMode: "local" | "worktree" | "rift";
   readonly branch: string | null;
   readonly worktreePath: string | null;
   readonly startFromOrigin: boolean;
@@ -42,7 +42,7 @@ export function buildProjectThreadStartTurnInput(spec: ProjectThreadStartTurnSpe
     text: spec.titleText ?? spec.text,
     attachments: spec.uploadedAttachments,
   });
-  const isWorktree = spec.workspaceMode === "worktree";
+  const isWorktree = spec.workspaceMode !== "local";
   return {
     commandId: CommandId.make(spec.commandId),
     creationSource: "mobile" as const,
@@ -73,9 +73,12 @@ export function buildProjectThreadStartTurnInput(spec: ProjectThreadStartTurnSpe
         ? {
             prepareWorktree: {
               projectCwd: spec.projectCwd,
+              ...(spec.workspaceMode === "rift" ? { workspaceKind: "rift" as const } : {}),
               baseBranch: spec.branch!,
               branch: spec.worktreeBranchName,
-              ...(spec.startFromOrigin ? { startFromOrigin: true } : {}),
+              ...(spec.workspaceMode === "worktree" && spec.startFromOrigin
+                ? { startFromOrigin: true }
+                : {}),
             },
             runSetupScript: true,
           }

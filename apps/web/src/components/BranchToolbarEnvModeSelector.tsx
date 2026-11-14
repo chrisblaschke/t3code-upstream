@@ -28,6 +28,7 @@ const PREVIOUS_WORKTREE_SELECT_VALUE = "previous-worktree";
 
 interface BranchToolbarEnvModeSelectorProps {
   forceNewWorktree?: boolean;
+  riftUsable?: boolean;
   envLocked: boolean;
   effectiveEnvMode: EnvMode;
   activeWorktreePath: string | null;
@@ -39,6 +40,7 @@ interface BranchToolbarEnvModeSelectorProps {
 
 export const BranchToolbarEnvModeSelector = memo(function BranchToolbarEnvModeSelector({
   forceNewWorktree = false,
+  riftUsable = false,
   envLocked,
   effectiveEnvMode,
   activeWorktreePath,
@@ -54,11 +56,11 @@ export const BranchToolbarEnvModeSelector = memo(function BranchToolbarEnvModeSe
   );
   const showPreviousWorktree = Boolean(previousWorktreeLabel && onUsePreviousWorktree);
   const envModeItems = [
-    {
-      value: "local",
-      label: resolveCurrentWorkspaceLabel(activeWorktreePath),
-    },
+    ...(!forceNewWorktree
+      ? [{ value: "local", label: resolveCurrentWorkspaceLabel(activeWorktreePath) }]
+      : []),
     { value: "worktree", label: resolveEnvModeLabel("worktree") },
+    ...(riftUsable ? [{ value: "rift", label: resolveEnvModeLabel("rift") }] : []),
     ...(showPreviousWorktree && previousWorktreeLabel
       ? [{ value: PREVIOUS_WORKTREE_SELECT_VALUE, label: previousWorktreeLabel }]
       : []),
@@ -70,7 +72,7 @@ export const BranchToolbarEnvModeSelector = memo(function BranchToolbarEnvModeSe
     }
   };
 
-  if (envLocked || forceNewWorktree) {
+  if (envLocked || (forceNewWorktree && !riftUsable)) {
     const lockedRow = (
       <span
         className="inline-flex h-7 min-w-0 items-center gap-1.5 border border-transparent px-1.75 font-normal text-muted-foreground/70 text-sm sm:h-6 sm:text-xs"
@@ -142,8 +144,8 @@ export const BranchToolbarEnvModeSelector = memo(function BranchToolbarEnvModeSe
           </ComposerContextLabel>
         </TooltipTrigger>
         <TooltipPopup>
-          {effectiveEnvMode === "worktree"
-            ? resolveEnvModeLabel("worktree")
+          {effectiveEnvMode !== "local"
+            ? resolveEnvModeLabel(effectiveEnvMode)
             : resolveCurrentWorkspaceLabel(activeWorktreePath)}
           {shortcutLabel ? ` · ${shortcutLabel}` : null}
         </TooltipPopup>
@@ -155,22 +157,32 @@ export const BranchToolbarEnvModeSelector = memo(function BranchToolbarEnvModeSe
       >
         <SelectGroup>
           <SelectGroupLabel>Workspace</SelectGroupLabel>
-          <SelectItem value="local">
-            <span className="inline-flex items-center gap-1.5">
-              {activeWorktreePath ? (
-                <FolderGitIcon className="size-3" />
-              ) : (
-                <FolderIcon className="size-3" />
-              )}
-              {resolveCurrentWorkspaceLabel(activeWorktreePath)}
-            </span>
-          </SelectItem>
+          {!forceNewWorktree ? (
+            <SelectItem value="local">
+              <span className="inline-flex items-center gap-1.5">
+                {activeWorktreePath ? (
+                  <FolderGitIcon className="size-3" />
+                ) : (
+                  <FolderIcon className="size-3" />
+                )}
+                {resolveCurrentWorkspaceLabel(activeWorktreePath)}
+              </span>
+            </SelectItem>
+          ) : null}
           <SelectItem value="worktree">
             <span className="inline-flex items-center gap-1.5">
               <FolderGit2Icon className="size-3" />
               {resolveEnvModeLabel("worktree")}
             </span>
           </SelectItem>
+          {riftUsable ? (
+            <SelectItem value="rift">
+              <span className="inline-flex items-center gap-1.5">
+                <FolderGit2Icon className="size-3" />
+                {resolveEnvModeLabel("rift")}
+              </span>
+            </SelectItem>
+          ) : null}
           {showPreviousWorktree && previousWorktreeLabel ? (
             <SelectItem value={PREVIOUS_WORKTREE_SELECT_VALUE}>
               <PreviousWorktreeItemContent branch={previousWorktreeBranch} />

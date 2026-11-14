@@ -19,6 +19,8 @@ import { Argument, Command, Flag } from "effect/cli";
 import { FetchHttpClient, HttpClient, HttpClientRequest, HttpClientResponse } from "effect/http";
 import { ChildProcess, ChildProcessSpawner } from "effect/process";
 
+import { loadRepoEnv } from "./lib/public-config.ts";
+
 export type NativePlatform = "ios" | "android";
 const NativeClientRecord = Schema.Struct({ fingerprint: Schema.String, binary: Schema.String });
 const encodeRecord = Schema.encodeEffect(Schema.fromJsonString(NativeClientRecord));
@@ -135,7 +137,10 @@ export const hashBundle = Effect.fn("hashBundle")(function* (root: string) {
 });
 type FileSystemError = import("effect/PlatformError").PlatformError;
 
-const bundleId = "com.t3tools.t3code.dev";
+const androidPackage = "com.t3tools.t3code.dev";
+// iOS follows the fork's T3CODE_IOS_BUNDLE_ID override, which the prebuild inherits
+// through apps/mobile/app.config.ts; Android keeps upstream's package.
+const iosBundleId = loadRepoEnv().T3CODE_IOS_BUNDLE_ID?.trim() || androidPackage;
 const roots = Effect.gen(function* () {
   const path = yield* Path.Path;
   const repo = yield* path.fromFileUrl(new URL("../", import.meta.url));
@@ -345,14 +350,23 @@ export const installedBinary = Effect.fn("installedBinary")(function* (
 ) {
   if (platform === "ios") {
     const apps = yield* run("xcrun", ["simctl", "listapps", device]);
-    if (!apps.includes(`"${bundleId}"`)) return null;
+    if (!apps.includes(`"${iosBundleId}"`)) return null;
     return yield* hashBundle(
-      yield* run("xcrun", ["simctl", "get_app_container", device, bundleId, "app"]),
+      yield* run("xcrun", ["simctl", "get_app_container", device, iosBundleId, "app"]),
     );
   }
-  const installed = yield* run("adb", ["-s", device, "shell", "pm", "list", "packages", bundleId]);
-  if (!installed.split("\n").some((line) => line.trim() === `package:${bundleId}`)) return null;
-  const packages = yield* run("adb", ["-s", device, "shell", "pm", "path", bundleId]);
+  const installed = yield* run("adb", [
+    "-s",
+    device,
+    "shell",
+    "pm",
+    "list",
+    "packages",
+    androidPackage,
+  ]);
+  if (!installed.split("\n").some((line) => line.trim() === `package:${androidPackage}`))
+    return null;
+  const packages = yield* run("adb", ["-s", device, "shell", "pm", "path", androidPackage]);
   const apks = packages
     .split("\n")
     .filter((line) => line.startsWith("package:"))
@@ -1034,7 +1048,7 @@ const install = Effect.fn("nativeClient.install")(function* (
         Effect.fail(
           error.message.includes("INSTALL_FAILED_UPDATE_INCOMPATIBLE")
             ? new NativeClientError({
-                message: `The installed client has a different signature. Remove it with adb -s ${device} uninstall ${bundleId} (this clears its pairings), then run ensure again.`,
+                message: `The installed client has a different signature. Remove it with adb -s ${device} uninstall ${androidPackage} (this clears its pairings), then run ensure again.`,
               })
             : error,
         ),
@@ -1100,6 +1114,7 @@ const installIntoSession = Effect.fn("nativeClient.installIntoSession")(function
   metro: string | undefined,
 ) {
   const started = yield* Clock.currentTimeMillis;
+  const bundleId = platform === "ios" ? iosBundleId : androidPackage;
   const path = yield* Path.Path;
   const node = yield* HostProcess.ExecutablePath;
   const agentDevice = path.join(

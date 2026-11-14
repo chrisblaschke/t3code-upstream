@@ -90,7 +90,28 @@ export function validateScheduledTasksSearch(raw: Record<string, unknown>) {
 }
 
 export type ScheduleMode = "fixed" | "once" | "interval" | "webhook";
-export type WorkspaceMode = "root" | "worktree" | "existing_worktree";
+export type WorkspaceMode = "root" | "worktree" | "existing_worktree" | "rift";
+
+/** Editing an unrelated field must not discard a scheduled snapshot's branch. */
+export function workspaceStrategyFromDraft(
+  draft: Pick<DraftState, "workspaceMode" | "existingWorktreePath" | "baseRef" | "startFromOrigin">,
+  original?: ScheduledTask["workspaceStrategy"],
+): ScheduledTask["workspaceStrategy"] {
+  switch (draft.workspaceMode) {
+    case "rift":
+      return original?.type === "rift" ? original : { type: "rift" };
+    case "root":
+      return { type: "root" };
+    case "existing_worktree":
+      return { type: "existing_worktree", worktreePath: draft.existingWorktreePath.trim() };
+    case "worktree":
+      return {
+        type: "worktree",
+        baseRef: draft.baseRef.trim() || "main",
+        startFromOrigin: draft.startFromOrigin,
+      };
+  }
+}
 
 export interface DraftState {
   readonly editingId: string | null;

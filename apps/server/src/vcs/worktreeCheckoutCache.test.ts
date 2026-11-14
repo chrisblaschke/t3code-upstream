@@ -16,6 +16,7 @@ import { ChildProcess, ChildProcessSpawner } from "effect/process";
 import * as ServerConfig from "../config.ts";
 import * as CheckoutCloner from "./CheckoutCloner.ts";
 import { makeGitVcsDriverCore } from "./GitVcsDriverCore.ts";
+import * as RiftWorkspaces from "./RiftWorkspaces.ts";
 import { makeWorktreeCheckoutCache } from "./worktreeCheckoutCache.ts";
 
 // Tests close their own scope first, so background cache builds finish before the temp folder goes.
@@ -82,7 +83,7 @@ const setup = Effect.gen(function* () {
         GIT_CONFIG_NOSYSTEM: "1",
       }),
     );
-  const driver = yield* provide(makeGitVcsDriverCore());
+  const driver = yield* provide(makeGitVcsDriverCore().pipe(Effect.provide(RiftWorkspaces.layer)));
   const { worktreeCheckoutCacheDir } = yield* ServerConfig.ServerConfig;
   const cache = (yield* provide(
     makeWorktreeCheckoutCache({ cacheDir: worktreeCheckoutCacheDir, execute: driver.execute }),

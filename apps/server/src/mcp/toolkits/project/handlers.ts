@@ -162,7 +162,7 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
         }
         // Reject unresolved base refs before accepting a launch; worktree provisioning happens later.
         const strategy = input.workspaceStrategy;
-        if (!replaying && strategy?.type === "worktree")
+        if (!replaying && (strategy?.type === "worktree" || strategy?.type === "rift"))
           yield* ThreadLaunch.ThreadLaunchService.pipe(
             Effect.flatMap((launches) =>
               launches.checkWorktreeBase({ projectId, workspaceStrategy: strategy }),
@@ -175,7 +175,7 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
                     error._tag === "ThreadLaunchNotRepositoryError"
                       ? `${error.message} No thread was created. Use workspaceStrategy: {type: "root"}, or pass the projectId of a Git repository.`
                       : `${error.message} No thread was created. Pass a branch, tag, or commit that exists there${
-                          strategy.startFromOrigin === true
+                          strategy.type === "worktree" && strategy.startFromOrigin === true
                             ? "; the project has no usable remote to fetch it from."
                             : ", or set startFromOrigin:true if it exists only on a remote."
                         }`,

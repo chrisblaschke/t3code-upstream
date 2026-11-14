@@ -2206,6 +2206,10 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
           readonly reports: ReadonlyMap<string, BackgroundWorkReport>;
           readonly offered: ReadonlySet<string>;
         }>(noWakeReports);
+        const backgroundTaskRunIds = new Map<
+          string,
+          NonNullable<ActiveAcpTurn["input"]["runId"]>
+        >();
         const recordWakeReport = Effect.fnUntraced(function* (
           key: string,
           report: BackgroundWorkReport,
@@ -2213,7 +2217,12 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
           const context = yield* Ref.get(activeTurn);
           if (context !== null && !context.promptSettled && !context.finalized) return;
           yield* Ref.update(wakeReports, ({ reports, offered }) => ({
-            reports: new Map(reports).set(key, report),
+            reports: new Map(reports).set(key, {
+              ...report,
+              ...(backgroundTaskRunIds.has(key)
+                ? { originRunId: backgroundTaskRunIds.get(key)! }
+                : {}),
+            }),
             offered,
           }));
         });
@@ -2242,6 +2251,10 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
             if (running && (yield* Ref.get(endedBackgroundTaskIds)).has(taskId)) {
               return;
             }
+            const context = yield* Ref.get(activeTurn);
+            if (running && context?.input.runId != null && !backgroundTaskRunIds.has(taskId)) {
+              backgroundTaskRunIds.set(taskId, context.input.runId);
+            }
             yield* Ref.update(runningBackgroundTaskIds, (current) => {
               if (current.has(taskId) === running) return current;
               const next = new Set(current);
@@ -2261,6 +2274,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
             for (const oldest of next) {
               if (next.size <= endedBackgroundTaskIdLimit) break;
               next.delete(oldest);
+              backgroundTaskRunIds.delete(oldest);
             }
             return next;
           }).pipe(Effect.andThen(setBackgroundTaskRunning(taskId, false)));
@@ -5012,11 +5026,15 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
             );
             if (stateEvent === undefined) return;
             if (stateEvent._tag === "UsageUpdated") {
+              const usage = {
+                ...stateEvent.usage,
+                updatedAt: DateTime.formatIso(yield* DateTime.now),
+              };
               yield* Ref.update(contextUsageBySessionId, (current) =>
-                new Map(current).set(notification.sessionId, stateEvent.usage),
+                new Map(current).set(notification.sessionId, usage),
               );
               if (context?.nativeThreadId === notification.sessionId) {
-                context.contextUsage = stateEvent.usage;
+                context.contextUsage = usage;
               }
             } else {
               const metadata = yield* Ref.modify(nativeMetadataBySessionId, (current) => {
@@ -7136,6 +7154,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
                 yield* Ref.set(continuationRequested, false);
                 yield* Ref.set(runningBackgroundTaskIds, new Set());
                 yield* Ref.set(endedBackgroundTaskIds, new Set());
+                backgroundTaskRunIds.clear();
                 yield* Ref.set(midTurnUnreportedCompletedTaskIds, new Set());
                 yield* Ref.set(handledBackgroundTaskIdsInActiveTurn, new Set());
                 yield* Ref.set(carryoverSubagents, null);

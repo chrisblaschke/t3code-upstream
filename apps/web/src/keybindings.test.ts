@@ -625,6 +625,96 @@ describe("resolveChatShortcutCommand", () => {
   );
 });
 
+describe("default Escape-to-stop shortcut", () => {
+  const composerContext = {
+    composerFocus: true,
+    turnRunning: true,
+    composerMenuOpen: false,
+    modelPickerOpen: false,
+  };
+
+  it("stops only a running turn from the focused composer", () => {
+    assert.equal(
+      resolveShortcutCommand(event({ key: "Escape" }), DEFAULT_RESOLVED_KEYBINDINGS, {
+        context: composerContext,
+      }),
+      "thread.stop",
+    );
+    assert.equal(
+      resolveShortcutCommand(event({ key: "Escape" }), DEFAULT_RESOLVED_KEYBINDINGS, {
+        context: { ...composerContext, turnRunning: false },
+      }),
+      null,
+    );
+    assert.equal(
+      resolveShortcutCommand(event({ key: "Escape" }), DEFAULT_RESOLVED_KEYBINDINGS, {
+        context: { ...composerContext, composerFocus: false },
+      }),
+      null,
+    );
+    assert.equal(
+      resolveShortcutCommand(
+        event({ key: "Escape", shiftKey: true }),
+        DEFAULT_RESOLVED_KEYBINDINGS,
+        { context: composerContext },
+      ),
+      null,
+    );
+  });
+
+  it.each([{ isComposing: true }, { keyCode: 229 }, { isComposing: false, keyCode: 229 }])(
+    "does not stop a turn on composing Escape (%j)",
+    (composition) => {
+      assert.isNull(
+        resolveShortcutCommand(
+          event({ key: "Escape", ...composition }),
+          DEFAULT_RESOLVED_KEYBINDINGS,
+          { context: composerContext },
+        ),
+      );
+    },
+  );
+
+  it.each(["stash picker", "dictation recording"])(
+    "leaves Escape to %s until it closes",
+    (surface) => {
+      let stashMenuOpen = surface === "stash picker";
+      let recording = surface === "dictation recording";
+      const resolveEscape = () =>
+        resolveShortcutCommand(event({ key: "Escape" }), DEFAULT_RESOLVED_KEYBINDINGS, {
+          context: {
+            ...composerContext,
+            composerMenuOpen: stashMenuOpen || recording,
+          },
+        });
+      assert.isNull(resolveEscape());
+      stashMenuOpen = false;
+      recording = false;
+      assert.equal(resolveEscape(), "thread.stop");
+    },
+  );
+
+  it.each([
+    { surface: "slash menu", context: { ...composerContext, composerMenuOpen: true } },
+    { surface: "mention menu", context: { ...composerContext, composerMenuOpen: true } },
+    // ChatView folds model-picker state into composerMenuOpen because the
+    // picker can retain editor focus while owning Escape dismissal.
+    {
+      surface: "model picker",
+      context: { ...composerContext, modelPickerOpen: true, composerMenuOpen: true },
+    },
+    {
+      surface: "dialog focus",
+      context: { ...composerContext, composerFocus: false, editableFocus: true },
+    },
+  ])("leaves Escape to close $surface", ({ context }) => {
+    assert.equal(
+      resolveShortcutCommand(event({ key: "Escape" }), DEFAULT_RESOLVED_KEYBINDINGS, { context }),
+      null,
+    );
+  });
+});
+
 describe("resolveShortcutCommand", () => {
   it("routes mod+w to the terminal while focused and to the right panel otherwise", () => {
     const closeEvent = event({ key: "w", metaKey: true });

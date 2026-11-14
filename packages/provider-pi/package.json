@@ -18,6 +18,10 @@
     "./server/usage": {
       "types": "./src/server/usage.ts",
       "import": "./src/server/usage.ts"
+    },
+    "./server/session": {
+      "types": "./src/server/session.ts",
+      "import": "./src/server/session.ts"
     }
   },
   "scripts": {

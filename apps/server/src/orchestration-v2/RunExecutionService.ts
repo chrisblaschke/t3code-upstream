@@ -970,10 +970,58 @@ export const layer: Layer.Layer<
           ).pipe(
             Effect.catchCauseIf(
               (cause) => !Cause.hasInterruptsOnly(cause),
-              (_cause) =>
-                Effect.logWarning(
-                  "orchestration V2 checkpoint baseline capture failed; starting provider without a baseline",
-                  { runId: input.run.id },
+              (cause) =>
+                Effect.gen(function* () {
+                  yield* Effect.logWarning(
+                    "orchestration V2 checkpoint baseline capture failed; starting provider without a baseline",
+                    { runId: input.run.id, cause },
+                  );
+                  // Fork: say it in the thread. A silent slow snapshot looks like a stuck turn.
+                  const now = yield* DateTime.now;
+                  const timedOut = Cause.pretty(cause).includes("VcsProcessTimeoutError");
+                  yield* eventSink.write({
+                    events: [
+                      {
+                        id: yield* idAllocator.allocate.event({ threadId: input.run.threadId }),
+                        type: "turn-item.updated" as const,
+                        threadId: input.run.threadId,
+                        runId: input.run.id,
+                        nodeId: input.rootNode.id,
+                        providerInstanceId: input.run.providerInstanceId,
+                        occurredAt: now,
+                        payload: {
+                          id: idAllocator.derive.runSignalTurnItem({
+                            runId: input.run.id,
+                            signal: "checkpoint-baseline-failed",
+                          }),
+                          threadId: input.run.threadId,
+                          runId: input.run.id,
+                          nodeId: input.rootNode.id,
+                          providerThreadId: input.providerThread.id,
+                          providerTurnId: null,
+                          nativeItemRef: null,
+                          parentItemId: null,
+                          ordinal: input.run.ordinal * 100 + 1,
+                          status: "completed" as const,
+                          title: null,
+                          startedAt: now,
+                          completedAt: now,
+                          updatedAt: now,
+                          type: "system_notice" as const,
+                          message: timedOut
+                            ? `Checkpoint skipped: git timed out in ${input.checkpointScope.cwd}. Large untracked files are the usual cause; add them to .gitignore. Turns start late until then.`
+                            : `Checkpoint skipped: git failed in ${input.checkpointScope.cwd}. This turn can't be reverted.`,
+                        },
+                      },
+                    ],
+                  });
+                }).pipe(
+                  Effect.catchCause((noticeCause) =>
+                    Effect.logWarning("failed to write checkpoint notice", {
+                      runId: input.run.id,
+                      cause: noticeCause,
+                    }),
+                  ),
                 ),
             ),
           );

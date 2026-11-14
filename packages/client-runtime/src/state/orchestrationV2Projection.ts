@@ -267,6 +267,11 @@ export function applyOrchestrationV2ProjectionEvent(
   const latestLocalTurnOrdinal = options?.latestLocalTurnOrdinal;
   const base = { ...projection, updatedAt: event.occurredAt };
   switch (event.type) {
+    case "thread.branch-reconciled":
+      return projection.thread.branch === event.payload.expectedBranch &&
+        projection.thread.worktreePath === event.payload.worktreePath
+        ? { ...base, thread: { ...projection.thread, branch: event.payload.branch } }
+        : projection;
     case "thread.pull-request-link-updated":
       return {
         ...base,

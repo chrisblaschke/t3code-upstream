@@ -781,11 +781,24 @@ export const layer: Layer.Layer<
                   // creation, HEAD already has the new name, even if the parent moved away.
                   const branch = yield* git.resolveBranchName(child.worktreePath, "HEAD");
                   if (branch === null || branch === child.branch) return storedEvents;
+                  // Provider ingestion bypasses the command lock. The projection
+                  // must guard the workspace and update only the branch, not replay
+                  // this snapshot over provider metadata attached concurrently.
+                  const current = yield* projections.getThread(child.id);
+                  if (
+                    current.branch !== child.branch ||
+                    current.worktreePath !== child.worktreePath
+                  )
+                    return storedEvents;
                   const now = yield* DateTime.now;
                   const event = yield* makeDomainEvent(input, {
-                    type: "thread.metadata-updated",
+                    type: "thread.branch-reconciled",
                     threadId: child.id,
-                    payload: { ...child, branch, updatedAt: now },
+                    payload: {
+                      expectedBranch: child.branch,
+                      worktreePath: child.worktreePath,
+                      branch,
+                    },
                     occurredAt: now,
                   });
                   const synced = yield* eventSink.write({ events: [event] });

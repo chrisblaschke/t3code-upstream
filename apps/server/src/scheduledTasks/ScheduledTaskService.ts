@@ -1402,7 +1402,7 @@ export const layer = Layer.effect(
             })
           : { token: null, secret: null, secretChanged: true };
       const workspaceStrategy: ScheduledTask["workspaceStrategy"] =
-        input.workspaceStrategy.type === "worktree" &&
+        (input.workspaceStrategy.type === "worktree" || input.workspaceStrategy.type === "rift") &&
         (yield* managedFolders.isScratchProject(input.projectId))
           ? { type: "root" }
           : input.workspaceStrategy;

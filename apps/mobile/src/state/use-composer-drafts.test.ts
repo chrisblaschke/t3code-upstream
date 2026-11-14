@@ -173,8 +173,10 @@ import {
 import { appAtomRegistry } from "./atom-registry";
 import { startComposerDraftOperation } from "./composerDraftOperations";
 import { threadOutboxManager } from "./thread-outbox";
+import { queuedEditDraftKey } from "./queued-edit-draft-key";
 import {
   appendComposerDraftAttachments,
+  applyComposerEditorText,
   captureComposerDraftInsertion,
   countComposerDraftAttachmentsAfterSelection,
   getComposerDraftAfterSelection,
@@ -357,6 +359,55 @@ function modelReconciliationHarness(
 }
 
 describe("mobile composer drafts", () => {
+  it.each([false, true])(
+    "keeps queued-run edit text after a consumed prefill (reload: %s)",
+    async (reload) => {
+      await waitForComposerDraftsLoaded();
+      const threadKey = "environment:prefill-queued";
+      const editKey = queuedEditDraftKey(threadKey, "run-1");
+      const editorText = { text: "original prefill", at: "2026-10-07T00:00:00Z" };
+      expect(applyComposerEditorText(threadKey, editorText)).toBe(true);
+      setComposerDraftText(threadKey, "my in-progress draft");
+      if (reload) {
+        await flushComposerDrafts();
+        resetComposerDraftsLoadState();
+        appAtomRegistry.set(composerDraftsAtom, {});
+        await waitForComposerDraftsLoaded();
+      }
+      setComposerDraftText(editKey, "queued message to edit");
+      const applied = applyComposerEditorText(editKey, editorText, threadKey);
+      expect(getComposerDraftSnapshot(editKey).text).toBe("queued message to edit");
+      expect(applied).toBe(false);
+      const nextEditorText = { text: "new prefill", at: "2026-10-07T00:00:01Z" };
+      expect(applyComposerEditorText(editKey, nextEditorText, threadKey)).toBe(true);
+      expect(getComposerDraftSnapshot(editKey).text).toBe("new prefill");
+      expect(applyComposerEditorText(threadKey, nextEditorText)).toBe(false);
+      expect(getComposerDraftSnapshot(threadKey).text).toBe("my in-progress draft");
+    },
+  );
+  it.each(["edited draft", ""])(
+    "keeps %j when an editor prefill is replayed after reload",
+    async (edited) => {
+      await waitForComposerDraftsLoaded();
+      const key = "environment:prefill-thread";
+      const editorText = { text: "original prefill", at: "2026-10-07T00:00:00Z" };
+      expect(applyComposerEditorText(key, editorText)).toBe(true);
+      setComposerDraftText(key, edited);
+      expect(applyComposerEditorText(key, editorText)).toBe(false);
+      expect(getComposerDraftSnapshot(key).text).toBe(edited);
+      await flushComposerDrafts();
+      resetComposerDraftsLoadState();
+      appAtomRegistry.set(composerDraftsAtom, {});
+      await waitForComposerDraftsLoaded();
+      expect(applyComposerEditorText(key, editorText)).toBe(false);
+      expect(getComposerDraftSnapshot(key).text).toBe(edited);
+      expect(applyComposerEditorText("other-environment:prefill-thread", editorText)).toBe(true);
+      expect(
+        applyComposerEditorText(key, { text: "new prefill", at: "2026-10-07T00:00:01Z" }),
+      ).toBe(true);
+      expect(getComposerDraftSnapshot(key).text).toBe("new prefill");
+    },
+  );
   it.each([false, true])(
     "restores visible file chips from legacy drafts (archived: %s)",
     async (archived) => {

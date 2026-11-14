@@ -1498,6 +1498,7 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
           .filter((call) => call.background)
           .map((call) => ({
             taskId: call.nativeId,
+            ...(call.turn.input.runId == null ? {} : { originRunId: call.turn.input.runId }),
             kind: "subagent" as const,
             ...(call.title?.trim() ? { description: call.title.trim() } : {}),
             ...(call.child?.subagent === undefined
@@ -1529,7 +1530,7 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
             : [],
         ),
       );
-      const allTasks = [...roster, ...imageTasks];
+      const allTasks: typeof roster = [...roster, ...imageTasks];
       const current = state.providerThread.pendingBackgroundTasks ?? [];
       if (
         state.publishedBackgroundWork === hasBackground(state) &&
@@ -1537,6 +1538,7 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
         current.every(
           (task, index) =>
             task.taskId === allTasks[index]?.taskId &&
+            task.originRunId === allTasks[index]?.originRunId &&
             task.description === allTasks[index]?.description &&
             (task.kind === "subagent" ? task.childThreadId : undefined) ===
               (allTasks[index]?.kind === "subagent" ? allTasks[index]?.childThreadId : undefined),
@@ -2918,6 +2920,7 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
         text: payload.text,
         report: {
           kind: "subagent",
+          ...(call?.turn.input.runId == null ? {} : { originRunId: call.turn.input.runId }),
           label: call?.title ?? stringField(payload.metadata, "description"),
           childThreadId: call?.child?.subagent?.appThread.id,
           outcome,

@@ -122,6 +122,11 @@ it("enables the chosen provider only after a successful setup and keeps its gran
           await page.getByRole("option", { name: "Grok Voice Transcribe via Laptop" }).click();
           await dialog.getByRole("button", { name: "Use Grok Voice Transcribe" }).click();
           await expect.element(destination).toHaveTextContent("Grok Voice Transcribe via Laptop");
+          await screen.getByRole("button", { name: "Manage key" }).click();
+          await expect
+            .element(dialog.getByRole("button", { name: "Remove key…" }))
+            .not.toBeInTheDocument();
+          await dialog.getByRole("button", { name: "Cancel" }).click();
           await destination.click();
           await page.getByRole("option", { name: "Off", exact: true }).click();
           await expect.element(destination).toHaveTextContent("Off");

@@ -40,6 +40,8 @@ import { BranchToolbarEnvironmentSelector } from "./BranchToolbarEnvironmentSele
 import { openAddProjectToMachine } from "./AddProjectToMachineDialog";
 import { type AddProjectTarget, useAddProjectTargets } from "../hooks/useAddProjectTargets";
 import { BranchToolbarEnvModeSelector } from "./BranchToolbarEnvModeSelector";
+import { useEnvironmentQuery } from "../state/query";
+import { vcsEnvironment } from "../state/vcs";
 import { PreviousWorktreeItemContent } from "./PreviousWorktreeItemContent";
 import { ThreadDetailsControl } from "./chat/ThreadDetailsControl";
 import {
@@ -140,6 +142,7 @@ function showWorkspaceContextMenu(event: ReactMouseEvent, workspacePath: string)
 }
 
 interface RunContextSelectorProps {
+  riftUsable: boolean;
   displayMode?: "toolbar" | "panel";
   workspaceRoot?: string;
   forceNewWorktree: boolean;
@@ -164,6 +167,7 @@ interface RunContextSelectorProps {
 
 const RunContextSelector = memo(function RunContextSelector({
   displayMode = "toolbar",
+  riftUsable,
   workspaceRoot,
   forceNewWorktree,
   autoEnvironmentLabel,
@@ -194,16 +198,16 @@ const RunContextSelector = memo(function RunContextSelector({
         ? FolderGitIcon
         : FolderIcon;
   const workspaceLabel = forceNewWorktree
-    ? resolveEnvModeLabel("worktree")
+    ? resolveEnvModeLabel(effectiveEnvMode)
     : envModeLocked
       ? resolveLockedWorkspaceLabel(activeWorktreePath, effectiveEnvMode)
-      : effectiveEnvMode === "worktree"
-        ? resolveEnvModeLabel("worktree")
+      : effectiveEnvMode !== "local"
+        ? resolveEnvModeLabel(effectiveEnvMode)
         : resolveCurrentWorkspaceLabel(activeWorktreePath);
   const isPanel = displayMode === "panel";
   const isLocked = envLocked || (envModeLocked && (!isPanel || !showEnvironmentPicker));
   const workspacePath =
-    forceNewWorktree || (effectiveEnvMode === "worktree" && !activeWorktreePath)
+    forceNewWorktree || (effectiveEnvMode !== "local" && !activeWorktreePath)
       ? null
       : (activeWorktreePath ?? workspaceRoot);
   const handleContextMenu = (event: ReactMouseEvent) => {
@@ -219,7 +223,9 @@ const RunContextSelector = memo(function RunContextSelector({
       <TooltipPopup>
         {isPanel
           ? forceNewWorktree
-            ? "Each model starts in its own worktree."
+            ? effectiveEnvMode === "rift"
+              ? "Each model starts in its own Rift snapshot."
+              : "Each model starts in its own worktree."
             : (workspacePath ?? workspaceLabel)
           : workspaceLabel}
       </TooltipPopup>
@@ -403,22 +409,32 @@ const RunContextSelector = memo(function RunContextSelector({
               onEnvModeChange(value as EnvMode);
             }}
           >
-            <MenuRadioItem disabled={envModeLocked || forceNewWorktree} value="local" closeOnClick>
-              <span className="flex min-w-0 items-center gap-1.5">
-                {activeWorktreePath ? (
-                  <FolderGitIcon className="size-3" />
-                ) : (
-                  <FolderIcon className="size-3" />
-                )}
-                <MiddleTruncate value={resolveCurrentWorkspaceLabel(activeWorktreePath)} />
-              </span>
-            </MenuRadioItem>
+            {!forceNewWorktree ? (
+              <MenuRadioItem disabled={envModeLocked} value="local" closeOnClick>
+                <span className="flex min-w-0 items-center gap-1.5">
+                  {activeWorktreePath ? (
+                    <FolderGitIcon className="size-3" />
+                  ) : (
+                    <FolderIcon className="size-3" />
+                  )}
+                  <MiddleTruncate value={resolveCurrentWorkspaceLabel(activeWorktreePath)} />
+                </span>
+              </MenuRadioItem>
+            ) : null}
             <MenuRadioItem disabled={envModeLocked} value="worktree" closeOnClick>
               <span className="flex min-w-0 items-center gap-1.5">
                 <FolderGit2Icon className="size-3" />
                 <span className="min-w-0 truncate">{resolveEnvModeLabel("worktree")}</span>
               </span>
             </MenuRadioItem>
+            {riftUsable ? (
+              <MenuRadioItem disabled={envModeLocked} value="rift" closeOnClick>
+                <span className="flex min-w-0 items-center gap-1.5">
+                  <FolderGit2Icon className="size-3" />
+                  <span>{resolveEnvModeLabel("rift")}</span>
+                </span>
+              </MenuRadioItem>
+            ) : null}
             {previousWorktreeLabel ? (
               <MenuRadioItem disabled={envModeLocked} value="previous-worktree" closeOnClick>
                 <PreviousWorktreeItemContent branch={previousWorktreeBranch} />
@@ -625,8 +641,17 @@ export const BranchToolbar = memo(function BranchToolbar({
   // The composer retains resolved thread details while bootstrap cleanup can remove its shell.
   const activeProjectRef = scopeProjectRef(environmentId, projectId);
   const activeProject = useProject(activeProjectRef);
+  const workspaceCapabilities = useEnvironmentQuery(
+    activeProject && !envLocked
+      ? vcsEnvironment.listRefs({
+          environmentId,
+          input: { cwd: activeProject.workspaceRoot, limit: 1 },
+        })
+      : null,
+  );
+  const riftUsable = workspaceCapabilities.data?.riftUsable === true;
   const activeWorktreePath = forceNewWorktree ? null : worktreePath;
-  const effectiveEnvMode = forceNewWorktree ? "worktree" : envMode;
+  const effectiveEnvMode = forceNewWorktree && envMode !== "rift" ? "worktree" : envMode;
   const envModeLocked = envLocked || (isServerThread && activeWorktreePath !== null);
 
   const canUsePreviousWorktree = !isServerThread && !envModeLocked && !forceNewWorktree;
@@ -695,6 +720,7 @@ export const BranchToolbar = memo(function BranchToolbar({
           <RunContextSelector
             displayMode="panel"
             workspaceRoot={activeProject.workspaceRoot}
+            riftUsable={riftUsable}
             forceNewWorktree={forceNewWorktree}
             autoEnvironmentLabel={autoEnvironmentLabel}
             onAutoEnvironment={onAutoEnvironment}
@@ -722,7 +748,7 @@ export const BranchToolbar = memo(function BranchToolbar({
             environmentId={environmentId}
             threadId={threadId}
             {...(draftId ? { draftId } : {})}
-            envLocked={envLocked}
+            envLocked={envLocked || (effectiveEnvMode === "rift" && activeWorktreePath === null)}
             effectiveEnvModeOverride={effectiveEnvMode}
             {...(activeThreadBranchOverride !== undefined ? { activeThreadBranchOverride } : {})}
             {...(onActiveThreadBranchOverrideChange ? { onActiveThreadBranchOverrideChange } : {})}
@@ -745,6 +771,7 @@ export const BranchToolbar = memo(function BranchToolbar({
       {showGitControls ? (
         <div className="contents @xl/composer-surface:hidden">
           <RunContextSelector
+            riftUsable={riftUsable}
             forceNewWorktree={forceNewWorktree}
             autoEnvironmentLabel={autoEnvironmentLabel}
             onAutoEnvironment={onAutoEnvironment}
@@ -796,6 +823,7 @@ export const BranchToolbar = memo(function BranchToolbar({
           )}
           {showGitControls ? (
             <BranchToolbarEnvModeSelector
+              riftUsable={riftUsable}
               forceNewWorktree={forceNewWorktree}
               envLocked={envModeLocked}
               effectiveEnvMode={effectiveEnvMode}
@@ -817,7 +845,7 @@ export const BranchToolbar = memo(function BranchToolbar({
           environmentId={environmentId}
           threadId={threadId}
           {...(draftId ? { draftId } : {})}
-          envLocked={envLocked}
+          envLocked={envLocked || (effectiveEnvMode === "rift" && activeWorktreePath === null)}
           effectiveEnvModeOverride={effectiveEnvMode}
           {...(activeThreadBranchOverride !== undefined ? { activeThreadBranchOverride } : {})}
           {...(onActiveThreadBranchOverrideChange ? { onActiveThreadBranchOverrideChange } : {})}

@@ -478,7 +478,7 @@ function CloudChoices({ environment, active, onClose }: Props & { onClose: () =>
                 onPress={submit}
               />
             )}
-            {key && canManage ? (
+            {key && canManage && (provider !== "xai" || Boolean(original)) ? (
               <Separated>
                 <ListActionRow
                   tone="danger"

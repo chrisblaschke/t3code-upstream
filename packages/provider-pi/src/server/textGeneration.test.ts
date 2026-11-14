@@ -1,4 +1,7 @@
 import { assert, it } from "@effect/vitest";
+import * as NodeServices from "@effect/platform-node/NodeServices";
+import * as FileSystem from "effect/FileSystem";
+import * as Path from "effect/Path";
 import { ProviderInstanceId } from "@t3tools/contracts";
 import { createModelSelection } from "@t3tools/shared/model";
 import * as Cause from "effect/Cause";
@@ -24,6 +27,7 @@ const makeFakePi = (
   Effect.gen(function* () {
     const stdout = yield* Queue.unbounded<Uint8Array, Cause.Done>();
     const received: Array<Record<string, unknown>> = [];
+    const launches: Array<ReadonlyArray<string>> = [];
     const emit = (record: Record<string, unknown>) =>
       Queue.offer(stdout, new TextEncoder().encode(`${encodeJsonLine(record)}\n`));
     let buffered = "";
@@ -51,8 +55,9 @@ const makeFakePi = (
           }
         }
       });
-    const spawner = ChildProcessSpawner.make(() =>
-      Effect.succeed(
+    const spawner = ChildProcessSpawner.make((command) => {
+      if (ChildProcess.isStandardCommand(command)) launches.push(command.args.map(String));
+      return Effect.succeed(
         ChildProcessSpawner.makeHandle({
           // Outside the valid pid range, so PiRpc's process-group kill never lands.
           pid: ChildProcessSpawner.ProcessId(999_999_999),
@@ -67,9 +72,9 @@ const makeFakePi = (
           getInputFd: () => Sink.drain,
           getOutputFd: () => Stream.empty,
         }),
-      ),
-    );
-    return { spawner, received };
+      );
+    });
+    return { spawner, received, launches };
   });
 
 it.effect("runs Pi offline, since the process is stopped as soon as it answers", () =>
@@ -99,6 +104,46 @@ it.effect("runs Pi offline, since the process is stopped as soon as it answers",
       [["--offline"]],
     );
   }),
+);
+
+it.effect("isolates helper context and restores explicit thinking with the Fast extension", () =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const agentDir = yield* fs.makeTempDirectoryScoped();
+    const extensionsDir = path.join(agentDir, "extensions");
+    yield* fs.makeDirectory(extensionsDir);
+    const fastExtension = path.join(extensionsDir, "codex-fast.ts");
+    yield* fs.writeFileString(fastExtension, "");
+    const pi = yield* makeFakePi('{"subject":"Fix typo","body":""}');
+    const textGeneration = yield* makePiTextGeneration(
+      { enabled: true, binaryPath: "pi", launchArgs: "", customModels: [] },
+      { PI_CODING_AGENT_DIR: agentDir },
+    ).pipe(Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, pi.spawner));
+    const result = yield* textGeneration.generateCommitMessage({
+      cwd: process.cwd(),
+      branch: "main",
+      stagedSummary: "M README.md",
+      stagedPatch: "diff --git a/README.md b/README.md",
+      modelSelection: createModelSelection(ProviderInstanceId.make("pi"), "openai-codex/gpt-5", [
+        { id: "thinking", value: "high" },
+      ]),
+    });
+    assert.equal(result.subject, "Fix typo");
+    const args = pi.launches[0]!;
+    for (const flag of ["--no-context-files", "--no-skills", "--no-extensions", "--no-tools"]) {
+      assert.include(args, flag);
+    }
+    assert.deepEqual(args.slice(-2), ["--extension", fastExtension]);
+    assert.deepEqual(
+      pi.received.slice(0, 3).map(({ id: _id, ...request }) => request),
+      [
+        { type: "get_available_models" },
+        { type: "set_model", provider: "openai-codex", modelId: "gpt-5" },
+        { type: "set_thinking_level", level: "high" },
+      ],
+    );
+  }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
 );
 
 it.effect("names the model and the disabled extensions when Pi cannot load it", () =>

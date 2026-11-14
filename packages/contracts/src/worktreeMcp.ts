@@ -1,6 +1,49 @@
 import * as Schema from "effect/Schema";
 
-import { TrimmedNonEmptyString } from "./baseSchemas.ts";
+import { NonNegativeInt, ProjectId, ThreadId, TrimmedNonEmptyString } from "./baseSchemas.ts";
+import { VcsListRefsResult, VcsRef } from "./git.ts";
+
+export const WorktreeMcpInventoryStatus = Schema.Union([
+  Schema.Struct({
+    exists: Schema.Boolean,
+    dirty: NonNegativeInt,
+    upstream: Schema.Boolean,
+    /** Divergence is unknown without an upstream (or a HEAD commit). */
+    ahead: Schema.NullOr(NonNegativeInt),
+    behind: Schema.NullOr(NonNegativeInt),
+    /** origin/HEAD's target, else a local main or master; null if none exists. */
+    defaultBranch: Schema.NullOr(Schema.String),
+    notInDefault: Schema.NullOr(NonNegativeInt),
+    /** HEAD commits unreachable from any other local branch or remote ref. */
+    onlyHere: NonNegativeInt,
+    lastCommitAt: Schema.NullOr(Schema.String),
+  }),
+  Schema.Struct({ error: Schema.String }),
+]);
+export type WorktreeMcpInventoryStatus = typeof WorktreeMcpInventoryStatus.Type;
+
+export const WorktreeMcpListResult = Schema.Struct({
+  ...VcsListRefsResult.fields,
+  refs: Schema.Array(
+    Schema.Struct({
+      ...VcsRef.fields,
+      isMainWorktree: Schema.optional(Schema.Boolean),
+      status: Schema.optional(WorktreeMcpInventoryStatus),
+      owners: Schema.optional(
+        Schema.Array(
+          Schema.Struct({
+            threadId: ThreadId,
+            projectId: ProjectId,
+            settled: Schema.Boolean,
+            archived: Schema.Boolean,
+          }),
+        ),
+      ),
+    }),
+  ),
+});
+
+export type WorktreeMcpListResult = typeof WorktreeMcpListResult.Type;
 
 /** Uses the managed worktree folder; handoff detaches the provider, ending this turn and resuming there next run. */
 export const WorktreeMcpHandoffInput = Schema.Struct({

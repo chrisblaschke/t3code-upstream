@@ -1707,6 +1707,74 @@ describe("MessagesTimeline thread find", () => {
   });
 });
 
+it("shows and expands nested command output while a terminal-mode outer tool is running", async () => {
+  setup();
+  const props = baseProps();
+  const fixture = makeStreamingTimelineFixture();
+  const outer = fixture.visibleTurnItems[4]!;
+  const child = fixture.visibleTurnItems[1]!;
+  if (outer.item.type !== "dynamic_tool" || child.item.type !== "command_execution") {
+    throw new Error("Expected tool fixtures");
+  }
+  const childId = TurnItemId.make("nested-command");
+  const output = "x".repeat(450) + "END_OF_NESTED_OUTPUT";
+  const entries = deriveTimelineEntriesFromVisibleTurnItems({
+    visibleTurnItems: [
+      fixture.visibleTurnItems[3]!,
+      {
+        ...outer,
+        item: {
+          ...outer.item,
+          toolName: "codemode",
+          status: "running",
+          completedAt: null,
+          output: undefined,
+        },
+      },
+      {
+        ...child,
+        sourceItemId: childId,
+        item: {
+          ...child.item,
+          id: childId,
+          runId: fixture.runId,
+          parentItemId: outer.item.id,
+          status: "completed",
+          exitCode: 0,
+          output,
+        },
+      },
+    ],
+    optimisticMessages: [],
+  });
+  const timeline = (terminalTranscript: boolean) => (
+    <MessagesTimeline
+      {...props}
+      terminalTranscript={terminalTranscript}
+      timelineEntries={entries}
+      isWorking
+      latestRun={{
+        runId: fixture.runId,
+        status: "running",
+        startedAt: fixture.time(5),
+        completedAt: null,
+      }}
+    />
+  );
+  await using screen = await renderElement(timeline(true));
+  await expect.element(screen.getByRole("button", { name: "Show full output" })).toBeVisible();
+  expect(screen.container.querySelector('[data-work-log-depth="1"]')).not.toBeNull();
+  expect(screen.text()).not.toContain("END_OF_NESTED_OUTPUT");
+  await screen.getByRole("button", { name: "Show full output" }).click();
+  expect(screen.text()).toContain(output);
+  await screen.getByRole("button", { name: "Show less" }).click();
+  expect(screen.text()).not.toContain("END_OF_NESTED_OUTPUT");
+  await screen.rerender(timeline(false));
+  await vi.waitFor(() => {
+    expect(screen.container.querySelector("[data-terminal-output]")).toBeNull();
+  });
+});
+
 describe("compact reasoning math", () => {
   it.each([
     [

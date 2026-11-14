@@ -217,6 +217,7 @@ export interface MessagesTimelineHistoryControls {
 }
 
 interface MessagesTimelineProps {
+  terminalTranscript?: boolean;
   pendingApprovals?: ReadonlyArray<PendingApproval>;
   heldApprovalRequestIds?: ReadonlySet<string> | undefined;
   respondingRequestIds?: TimelineRowSharedState["respondingRequestIds"];
@@ -408,6 +409,7 @@ const ConversationTimeline = memo(function ConversationTimeline({
   emptyPlaceholderInset,
   topFadeEnabled = false,
   historyControls,
+  terminalTranscript = false,
 }: MessagesTimelineProps) {
   const listIdentityKey = displayThreadKey ?? routeThreadKey;
   // Snapshot restore positions on identity changes; ongoing scroll writes must not move them.
@@ -727,6 +729,7 @@ const ConversationTimeline = memo(function ConversationTimeline({
   const rawRows = useIncrementalTimelineRows(`${listIdentityKey}\0${workspaceRoot ?? ""}`, {
     timelineEntries,
     pendingApprovalRequestIds,
+    terminal: terminalTranscript,
     latestRun,
     runningRunId,
     expandedRunIds: visibleExpandedRunIds,
@@ -845,6 +848,13 @@ const ConversationTimeline = memo(function ConversationTimeline({
   // while full screen releases its pin too.
   const onAppFullscreenChange = (rowId: string, fullscreen: boolean) => {
     setFullscreenAppRowId((current) => (fullscreen ? rowId : current === rowId ? null : current));
+  };
+  // Answering a question page grows it; following the end would yank the page from under the reader.
+  const onAppReaderResize = (rowId: string) => {
+    const list = listRef.current;
+    if (!list) return;
+    list.cancelScroll();
+    list.anchorVisibleContent({ key: rowId });
   };
   const alwaysRenderIndices = restoringAlwaysRender?.indices ?? [];
   // Screen readers can only reach headings in the DOM. Keeping the first and
@@ -1081,6 +1091,7 @@ const ConversationTimeline = memo(function ConversationTimeline({
     citationRequest: readyCitationRequest,
     listRef,
     timestampFormat,
+    terminalTranscript,
     routeThreadKey,
     threadRef: citationThreadRef,
     markdownCwd,
@@ -1097,6 +1108,7 @@ const ConversationTimeline = memo(function ConversationTimeline({
     onUseArtifactTemplate,
     onSendAppMessage,
     onAppFullscreenChange,
+    onAppReaderResize,
     onFileDownload,
     openPullRequest,
     onOpenToolDiff,

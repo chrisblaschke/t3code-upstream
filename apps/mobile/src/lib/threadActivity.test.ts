@@ -986,6 +986,54 @@ describe("buildThreadFeed", () => {
     ]);
   });
 
+  it("keeps every finished step as its own row in the terminal transcript", () => {
+    const second = {
+      ...command("2026-06-20T00:00:02.500Z"),
+      id: TurnItemId.make("item-command-2"),
+      input: "vp test",
+    };
+    const feed = buildThreadFeed([
+      projected(userMessage(), 0),
+      projected(command(), 1),
+      projected(second, 2),
+      projected(assistantMessage(), 3),
+    ]);
+    const latestRun = {
+      runId,
+      status: "completed" as const,
+      startedAt: "2026-06-20T00:00:01.000Z",
+      completedAt: "2026-06-20T00:00:03.000Z",
+    };
+
+    const terminal = deriveThreadFeedPresentation(
+      feed,
+      latestRun,
+      new Set(),
+      new Set(),
+      null,
+      false,
+      undefined,
+      undefined,
+      true,
+    );
+    expect(terminal.map((entry) => entry.type)).toEqual([
+      "message",
+      "activity-group",
+      "activity-group",
+      "message",
+    ]);
+    const steps = terminal.flatMap((entry) =>
+      entry.type === "activity-group" ? entry.activities : [],
+    );
+    expect(steps.map((activity) => activity.projectedItem.item.id)).toEqual([
+      "item-command",
+      "item-command-2",
+    ]);
+    expect(steps.every((activity) => activity.terminalOutput === true)).toBe(true);
+    // Adjacent steps read as one continuous work log.
+    expect(terminal[1]).toMatchObject({ continuesWorkLog: true });
+  });
+
   // regression: #21393 show plans and fold settled progress notes
   it("folds progress even when a response has no tool calls", () => {
     const feed = buildThreadFeed([
@@ -1151,6 +1199,31 @@ describe("buildThreadFeed", () => {
 
     const finished = present([subagent("item-done", "2026-06-20T00:00:03.000Z", 2, "completed")]);
     expect(finished.map((entry) => entry.type)).toEqual(["message", "run-fold", "message"]);
+  });
+
+  it("keeps failed run tool output inline in terminal mode", () => {
+    const feed = buildThreadFeed([
+      projected(userMessage(), 0),
+      projected({ ...command(), status: "failed" }, 1),
+    ]);
+    const presented = deriveThreadFeedPresentation(
+      feed,
+      {
+        runId,
+        status: "failed",
+        startedAt: "2026-06-20T00:00:01.000Z",
+        completedAt: "2026-06-20T00:00:02.000Z",
+      },
+      new Set(),
+      new Set(),
+      null,
+      false,
+      undefined,
+      undefined,
+      true,
+    );
+    const group = presented.find((entry) => entry.type === "activity-group");
+    expect(group?.activities[0]).toMatchObject({ terminalOutput: true, lifecycleStatus: "failed" });
   });
 
   it("folds each run of a provider-native subagent thread like a normal turn", () => {

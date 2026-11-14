@@ -1138,6 +1138,30 @@ describe("/usage-limits", () => {
     },
   ];
 
+  it("shows Pi cache quotas without offering source credit redemption, including native duplicates", () => {
+    const cached = sources.map((source) => ({
+      ...source,
+      kind: "pi" as const,
+      label: "Pi accounts",
+      accounts: source.accounts.map((account) => ({
+        ...account,
+        usageLimits: {
+          ...account.usageLimits,
+          resetCredits: { availableCount: 2, nextCreditId: `${account.id}-credit` },
+        },
+      })),
+    }));
+    const sourceOnly = collectProviderUsageLimits(selected.instanceId, [provider({})], cached, now);
+    expect(sourceOnly?.accounts[0]?.sourceLabel).toBe("Pi accounts");
+    expect(sourceOnly?.accounts[0]?.limits.windows).toEqual([window]);
+    expect(sourceOnly?.accounts.every((account) => account.resetCreditInput === undefined)).toBe(
+      true,
+    );
+
+    const withNative = collectProviderUsageLimits(selected.instanceId, [selected], cached, now);
+    expect(withNative?.accounts[0]?.resetCreditInput).toEqual({ instanceId: selected.instanceId });
+  });
+
   it("uses hub credit balances and redemption targets in the composer, including native duplicates", () => {
     const hubs = sources.map((source) => ({
       ...source,
@@ -1423,6 +1447,26 @@ describe("/usage-limits", () => {
     );
     expect(sourceOnly?.accounts).toEqual([]);
     expect(sourceOnly?.notices).toEqual(["Accounts: token expired"]);
+  });
+
+  it("advertises Pi commands globally and in workspaces for backing-only quotas", () => {
+    const pi = provider({
+      driver: ProviderDriverKind.make("pi"),
+      workspaceSnapshots: [
+        { cwd: "/tmp/project", checkedAt: limits.checkedAt, slashCommands: [], skills: [] },
+      ],
+    });
+    for (const [providers, snapshots] of [
+      [[pi], sources],
+      [[pi, selected], []],
+    ] as const) {
+      const advertised = withUsageLimitsCommands(providers, snapshots)[0]!;
+      expect(advertised.slashCommands.map((command) => command.name)).toEqual(["usage-limits"]);
+      expect(
+        advertised.workspaceSnapshots?.[0]?.slashCommands.map((command) => command.name),
+      ).toEqual(["usage-limits"]);
+    }
+    expect(withUsageLimitsCommands([pi], [])[0]?.slashCommands).toEqual([]);
   });
 
   it("advertises global and workspace commands only for providers present in Limits", () => {

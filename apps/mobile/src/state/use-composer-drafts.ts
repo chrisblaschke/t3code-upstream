@@ -397,6 +397,7 @@ export class ComposerDraftPersistenceError extends Schema.TaggedError<ComposerDr
 const isComposerDraftPersistenceError = Schema.is(ComposerDraftPersistenceError);
 
 export interface ComposerDraft {
+  readonly consumedEditorTextAt?: string;
   readonly text: string;
   readonly context?: OrchestrationMessageContext;
   readonly attachments: ReadonlyArray<DraftComposerAttachment>;
@@ -424,7 +425,7 @@ export interface ComposerDraftContent {
 }
 
 export interface ComposerDraftWorkspaceSelection {
-  readonly mode: "local" | "worktree";
+  readonly mode: "local" | "worktree" | "rift";
   readonly branch: string | null;
   readonly worktreePath: string | null;
   readonly startFromOrigin?: boolean;
@@ -448,7 +449,7 @@ export type ComposerDraftSettingsUpdate = Pick<
 >;
 
 const ComposerDraftWorkspaceSelectionSchema = Schema.Struct({
-  mode: Schema.Literals(["local", "worktree"]),
+  mode: Schema.Literals(["local", "worktree", "rift"]),
   branch: Schema.NullOr(Schema.String),
   worktreePath: Schema.NullOr(Schema.String),
   startFromOrigin: Schema.optional(Schema.Boolean),
@@ -469,6 +470,7 @@ const PersistedComposerContextSchema = Schema.Struct({
 });
 
 const ComposerDraftSchema = Schema.Struct({
+  consumedEditorTextAt: Schema.optional(Schema.String),
   text: Schema.String,
   context: Schema.optional(PersistedComposerContextSchema),
   attachments: Schema.Array(DraftComposerAttachmentSchema),
@@ -651,6 +653,7 @@ export function isComposerDraftEmpty(draft: ComposerDraft): boolean {
 
 function isEmptyDraft(draft: ComposerDraft): boolean {
   return (
+    draft.consumedEditorTextAt === undefined &&
     draft.text.length === 0 &&
     draft.attachments.length === 0 &&
     draft.modelSelection === undefined &&
@@ -1331,6 +1334,21 @@ function updateComposerDrafts(
 export function setStickyComposerModelSelection(modelSelection: ModelSelection): void {
   appAtomRegistry.set(stickyComposerModelSelectionAtom, modelSelection);
   schedulePersistComposerState();
+}
+
+export function applyComposerEditorText(
+  draftKey: string,
+  editorText: { text: string; at: string },
+  threadKey: string = draftKey,
+): boolean {
+  if (getComposerDraftSnapshot(threadKey).consumedEditorTextAt === editorText.at) return false;
+  // The persisted receipt belongs to the thread, not a queued-run edit draft.
+  updateComposerDrafts((current) => ({
+    ...current,
+    [threadKey]: { ...normalizeDraft(current[threadKey]), consumedEditorTextAt: editorText.at },
+  }));
+  setComposerDraftText(draftKey, editorText.text);
+  return true;
 }
 
 export function setComposerDraftText(draftKey: string, value: string): void {

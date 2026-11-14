@@ -354,11 +354,23 @@ const cleanupFixture = (
     let gitInspections = 0;
     let snapshotReads = 0;
     let terminalListener: ((event: TerminalMetadataStreamEvent) => Effect.Effect<void>) | undefined;
+    let rift = false;
+    const riftRemovals: string[] = [];
     let events: Stream.Stream<OrchestrationV2DomainEvent> = Stream.empty;
     const activated = yield* Deferred.make<void>();
     const context = yield* Layer.build(StorageCleanup.layer).pipe(
       Effect.provideService(GitVcsDriver.GitVcsDriver, {
         ...git,
+        listWorktreePaths: (cwd) =>
+          rift ? Effect.succeed([repo, worktree]) : git.listWorktreePaths(cwd),
+        removeWorktree: (input) =>
+          rift
+            ? Effect.gen(function* () {
+                expect(yield* fs.exists(`${input.path}/.rift`)).toBe(true);
+                yield* fs.remove(input.path, { recursive: true });
+                riftRemovals.push(input.path);
+              })
+            : git.removeWorktree(input),
         execute: (input) =>
           Effect.gen(function* () {
             gitInspections++;
@@ -561,6 +573,15 @@ const cleanupFixture = (
       fullStatusCalls: () => fullStatusCalls,
       snapshotReads: () => snapshotReads,
       sessionLiveChecks: () => sessionLiveChecks,
+      riftRemovals,
+      asRift: Effect.gen(function* () {
+        yield* command(repo, ["worktree", "remove", worktree]);
+        yield* fs.copy(repo, worktree);
+        yield* command(worktree, ["switch", "feature"]);
+        yield* fs.writeFileString(`${worktree}/.rift`, "workspace-id");
+        yield* fs.writeFileString(`${worktree}/.git/info/exclude`, "/.rift\n");
+        rift = true;
+      }),
       activate: (domainEvents: Stream.Stream<OrchestrationV2DomainEvent>) => {
         events = domainEvents;
         return Deferred.succeed(activated, undefined);
@@ -2144,6 +2165,38 @@ describe("storage cleanup reports and local file policies", () => {
           expect(yield* fixture.fs.readFileString(`${fixture.worktree}/tracked.txt`)).toBe(
             "original\n",
           );
+        }),
+      ),
+  );
+
+  it.live(
+    "retains idle and archived rift copies but routes queued explicit deletion through the driver",
+    () =>
+      runCleanupTest(
+        Effect.gen(function* () {
+          const f = yield* cleanupFixture();
+          yield* f.asRift;
+          expect((yield* f.service.runNow).entries[0]).toMatchObject({ outcome: "kept" });
+          expect(yield* f.fs.exists(f.worktree)).toBe(true);
+          f.setThreads([
+            shell({ branch: "feature", worktreePath: f.worktree, archivedAt: at(-20 * DAY_MS) }),
+          ]);
+          expect((yield* f.service.runNow).entries[0]).toMatchObject({ outcome: "kept" });
+          expect(f.riftRemovals).toEqual([]);
+          f.setThreads([]);
+          f.setDeletedThreads([
+            shell({ branch: "feature", worktreePath: f.worktree, deletedAt: at(-1) }),
+          ]);
+          f.setPolicy("tracked-changes");
+          const removed = yield* f.service.runNow;
+          expect(removed.entries[0]).toMatchObject({
+            outcome: "removed",
+            reason: "Thread was deleted; retained in Rift trash until manual rift gc",
+            bytes: 0,
+          });
+          expect(removed.bytesFreed).toBe(0);
+          expect(f.riftRemovals).toEqual([f.worktree]);
+          expect(yield* f.fs.exists(f.worktree)).toBe(false);
         }),
       ),
   );

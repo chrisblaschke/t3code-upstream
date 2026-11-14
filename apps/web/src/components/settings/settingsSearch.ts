@@ -332,6 +332,12 @@ export const SETTINGS_SEARCH_ITEMS = [
     searchTerms: ["transparent transparency solid menus dialogs composer"],
   },
   {
+    id: "transcript-mode",
+    title: "Transcript",
+    to: "/settings/appearance",
+    searchTerms: ["terminal compact tool calls output fold collapse verbose pi transcript"],
+  },
+  {
     id: "diff-color-scheme",
     title: "Diff colors",
     to: "/settings/diffs",

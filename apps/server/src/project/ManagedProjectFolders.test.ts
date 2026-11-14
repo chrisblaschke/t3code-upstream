@@ -12,8 +12,10 @@ import * as Logger from "effect/Logger";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as PlatformError from "effect/PlatformError";
-import { ChildProcessSpawner } from "effect/process";
 import * as Scope from "effect/Scope";
+import * as Sink from "effect/Sink";
+import * as Stream from "effect/Stream";
+import { ChildProcess, ChildProcessSpawner } from "effect/process";
 
 import * as ServerConfig from "../config.ts";
 import * as GitManager from "../git/GitManager.ts";
@@ -23,6 +25,7 @@ import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import * as ProcessRunner from "../processRunner.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
+import * as RiftWorkspaces from "../vcs/RiftWorkspaces.ts";
 import * as VcsDriverRegistry from "../vcs/VcsDriverRegistry.ts";
 import * as VcsProcess from "../vcs/VcsProcess.ts";
 import * as WorkspacePaths from "../workspace/WorkspacePaths.ts";
@@ -55,12 +58,69 @@ const layerEnrichment = ProjectEnrichmentService.layer.pipe(
 const layerRealGit = GitVcsDriver.layer.pipe(Layer.provide(VcsProcess.layer));
 
 interface HarnessOptions {
+  readonly rift?: {
+    readonly calls: string[];
+    readonly removeCalls?: string[];
+    readonly available?: boolean;
+    readonly onBinaryCheck?: () => void;
+    readonly cow?: boolean;
+    readonly failInit?: boolean;
+    readonly partialInit?: boolean;
+  };
+  /** The processes repository detection runs, such as a machine with no Git. */
   readonly vcsProcess?: Layer.Layer<VcsProcess.VcsProcess>;
   readonly git?: typeof layerRealGit;
   readonly projects?: (
     real: ProjectService.ProjectService["Service"],
   ) => ProjectService.ProjectService["Service"];
 }
+
+// Intercept only rift; scaffold/detection still use real git. No test ever
+// registers a workspace with the host's real rift installation.
+const layerRiftSpawner = (options: NonNullable<HarnessOptions["rift"]>) =>
+  Layer.effect(
+    ChildProcessSpawner.ChildProcessSpawner,
+    Effect.gen(function* () {
+      const delegate = yield* ChildProcessSpawner.ChildProcessSpawner;
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      return ChildProcessSpawner.make((command) =>
+        Effect.gen(function* () {
+          if (!ChildProcess.isStandardCommand(command) || path.basename(command.command) !== "rift")
+            return yield* delegate.spawn(command);
+          const cwd = command.options.cwd;
+          if (!cwd) return yield* Effect.die("rift must have a cwd");
+          const removing = command.args[0] === "remove";
+          assert.deepEqual(
+            command.args,
+            removing ? ["remove", "--no-hooks", "--force", cwd] : ["init", "--here"],
+          );
+          if (removing) {
+            options.removeCalls?.push(cwd);
+            yield* fs.remove(path.join(cwd, ".rift"));
+          } else options.calls.push(cwd);
+          if (!removing && (!options.failInit || options.partialInit)) {
+            yield* fs.writeFileString(path.join(cwd, ".rift"), "test-workspace-id\n");
+            if (yield* fs.exists(path.join(cwd, ".git")))
+              yield* fs.writeFileString(path.join(cwd, ".git/info/exclude"), ".rift\n");
+          }
+          return ChildProcessSpawner.makeHandle({
+            pid: ChildProcessSpawner.ProcessId(1),
+            exitCode: Effect.succeed(ChildProcessSpawner.ExitCode(options.failInit ? 1 : 0)),
+            isRunning: Effect.succeed(false),
+            kill: () => Effect.void,
+            unref: Effect.succeed(Effect.void),
+            stdin: Sink.drain,
+            stdout: Stream.empty,
+            stderr: Stream.empty,
+            all: Stream.empty,
+            getInputFd: () => Sink.drain,
+            getOutputFd: () => Stream.empty,
+          });
+        }),
+      );
+    }),
+  );
 
 const layer = (baseDir: string, options?: HarnessOptions) =>
   ManagedProjectFolders.layer.pipe(
@@ -80,6 +140,17 @@ const layer = (baseDir: string, options?: HarnessOptions) =>
     Layer.provideMerge(SqlitePersistence.layerMemory),
     Layer.provideMerge(ServerSettings.layerTest()),
     Layer.provideMerge(ServerConfig.layerTest(baseDir, baseDir)),
+    Layer.provideMerge(
+      Layer.succeed(RiftWorkspaces.RiftHostChecks, {
+        binaryAvailable: async () => {
+          options?.rift?.onBinaryCheck?.();
+          return options?.rift?.available ?? options?.rift !== undefined;
+        },
+        filesystemSupportsCow: async () => options?.rift?.cow ?? true,
+        filesystemReady: async () => options?.rift?.cow ?? true,
+      }),
+    ),
+    Layer.provideMerge(options?.rift ? layerRiftSpawner(options.rift) : Layer.empty),
     Layer.provideMerge(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)),
   );
 
@@ -90,6 +161,7 @@ const withScratch = <A, E>(
     A,
     E,
     | ManagedProjectFolders.ManagedProjectFolders
+    | ServerSettings.ServerSettingsService
     | ProjectService.ProjectService
     | NodeServices.NodeServices
     | Scope.Scope
@@ -144,6 +216,18 @@ it.effect("offers nothing, and says why once, when the data dir sits inside a Gi
     assert.equal(warnings.length, 1);
     assert.include(warnings[0], baseDir);
   }).pipe(Effect.scoped, Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)));
+});
+
+it.effect("shares one Rift service across folders, workspace paths, and Git", () => {
+  let checks = 0;
+  return withScratch(() => Effect.sync(() => assert.equal(checks, 1)), {
+    rift: {
+      calls: [],
+      onBinaryCheck: () => {
+        checks++;
+      },
+    },
+  });
 });
 
 it.effect("offers a Scratch folder when Git is not installed", () =>
@@ -345,6 +429,243 @@ const TEST_IDENTITY = {
 
 const gitOutput = (cwd: string, args: ReadonlyArray<string>) =>
   git(cwd, args).pipe(Effect.map((result) => result.stdout.trim()));
+
+it.effect(
+  "initializes a newly scaffolded named project before publishing, without a restart",
+  () => {
+    const calls: string[] = [];
+    let published = false;
+    return withScratch(
+      () =>
+        withGitEnv(
+          TEST_IDENTITY,
+          Effect.gen(function* () {
+            const folders = yield* ManagedProjectFolders.ManagedProjectFolders;
+            const rift = yield* RiftWorkspaces.make.pipe(Effect.provide(ProcessRunner.layer));
+            const result = yield* folders.createNamedProject({ name: "Ready" });
+            assert.deepEqual(calls, [result.workspaceRoot]);
+            assert.isTrue(published);
+            assert.isTrue(yield* rift.usable(result.workspaceRoot));
+            assert.equal(
+              yield* gitOutput(result.workspaceRoot, ["check-ignore", ".rift"]),
+              ".rift",
+            );
+          }),
+        ),
+      {
+        rift: { calls },
+        projects: (real) => ({
+          ...real,
+          create: (input) => {
+            assert.deepEqual(calls, [input.workspaceRoot]);
+            published = true;
+            return real.create(input);
+          },
+        }),
+      },
+    );
+  },
+);
+
+it.effect.each([{ cow: false }, { available: false }])(
+  "does not initialize a named project with disabled capability %j",
+  (disabled) => {
+    const calls: string[] = [];
+    return withScratch(
+      () =>
+        withGitEnv(
+          TEST_IDENTITY,
+          Effect.gen(function* () {
+            const folders = yield* ManagedProjectFolders.ManagedProjectFolders;
+            const projects = yield* ProjectService.ProjectService;
+            const result = yield* folders.createNamedProject({ name: "No Copy" });
+            assert.deepEqual(calls, []);
+            assert.isTrue(Option.isSome(yield* projects.getById(result.projectId)));
+          }),
+        ),
+      { rift: { calls, ...disabled } },
+    );
+  },
+);
+
+it.effect("still creates a named project when rift init fails", () => {
+  const calls: string[] = [];
+  return withScratch(
+    () =>
+      withGitEnv(
+        TEST_IDENTITY,
+        Effect.gen(function* () {
+          const folders = yield* ManagedProjectFolders.ManagedProjectFolders;
+          const projects = yield* ProjectService.ProjectService;
+          const result = yield* folders.createNamedProject({ name: "Failed Init" });
+          assert.deepEqual(calls, [result.workspaceRoot]);
+          assert.isTrue(Option.isSome(yield* projects.getById(result.projectId)));
+          const rift = yield* RiftWorkspaces.make.pipe(Effect.provide(ProcessRunner.layer));
+          assert.isFalse(yield* rift.usable(result.workspaceRoot));
+        }),
+      ),
+    { rift: { calls, failInit: true } },
+  );
+});
+
+it.effect("hides Copy and keeps the project if init fails after writing its marker", () => {
+  const calls: string[] = [];
+  const removeCalls: string[] = [];
+  return withScratch(
+    () =>
+      withGitEnv(
+        TEST_IDENTITY,
+        Effect.gen(function* () {
+          const folders = yield* ManagedProjectFolders.ManagedProjectFolders;
+          const projects = yield* ProjectService.ProjectService;
+          const result = yield* folders.createNamedProject({ name: "Partial Init" });
+          const rift = yield* RiftWorkspaces.make.pipe(Effect.provide(ProcessRunner.layer));
+          assert.deepEqual(calls, [result.workspaceRoot]);
+          assert.deepEqual(removeCalls, calls);
+          assert.isFalse(yield* rift.usable(result.workspaceRoot));
+          assert.isTrue(Option.isSome(yield* projects.getById(result.projectId)));
+        }),
+      ),
+    { rift: { calls, removeCalls, failInit: true, partialInit: true } },
+  );
+});
+
+it.effect("initializes add-project roots only when T3 exclusively creates a missing folder", () => {
+  const calls: string[] = [];
+  return withScratch(
+    ({ baseDir }) =>
+      Effect.gen(function* () {
+        const projects = yield* ProjectService.ProjectService;
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const existing = path.join(baseDir, "existing");
+        const fresh = path.join(baseDir, "nested", "new");
+        yield* fs.makeDirectory(existing);
+        for (const [index, root] of [existing, fresh].entries()) {
+          yield* projects.create({
+            commandId: CommandId.make(`add:${index}`),
+            projectId: ProjectId.make(`add:${index}`),
+            title: "Added",
+            workspaceRoot: root,
+            createWorkspaceRootIfMissing: true,
+          });
+        }
+        assert.deepEqual(calls, [fresh]);
+        // Plain directories are supported by rift init too, not just repositories.
+        assert.isTrue(yield* fs.exists(path.join(fresh, ".rift")));
+        assert.isFalse(yield* fs.exists(path.join(existing, ".rift")));
+      }),
+    { rift: { calls } },
+  );
+});
+
+it.effect("keeps clone placeholders empty instead of initializing them with rift", () => {
+  const calls: string[] = [];
+  return withScratch(
+    ({ baseDir }) =>
+      Effect.gen(function* () {
+        const projects = yield* ProjectService.ProjectService;
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const root = path.join(baseDir, "clone-destination");
+        const source = path.join(baseDir, "clone-source");
+        yield* fs.makeDirectory(source);
+        yield* git(source, ["init", "--bare", "--quiet"]);
+        yield* projects.create({
+          commandId: CommandId.make("clone:placeholder"),
+          projectId: ProjectId.make("clone:placeholder"),
+          title: "Cloning",
+          workspaceRoot: root,
+          createWorkspaceRootIfMissing: true,
+          initializeNewWorkspaceWithRift: false,
+        });
+        assert.deepEqual(yield* fs.readDirectory(root), []);
+        assert.deepEqual(calls, []);
+        assert.equal((yield* git(source, ["clone", "--", source, root])).code, 0);
+        assert.isTrue(yield* fs.exists(path.join(root, ".git")));
+      }),
+    { rift: { calls } },
+  );
+});
+
+it.effect("does not initialize a missing add-project folder on an unsupported filesystem", () => {
+  const calls: string[] = [];
+  return withScratch(
+    ({ baseDir }) =>
+      Effect.gen(function* () {
+        const projects = yield* ProjectService.ProjectService;
+        const path = yield* Path.Path;
+        const created = yield* projects.create({
+          commandId: CommandId.make("add:unsupported"),
+          projectId: ProjectId.make("add:unsupported"),
+          title: "Added",
+          workspaceRoot: path.join(baseDir, "new"),
+          createWorkspaceRootIfMissing: true,
+        });
+        assert.equal(created.workspaceRoot, path.join(baseDir, "new"));
+        assert.deepEqual(calls, []);
+      }),
+    { rift: { calls, cow: false } },
+  );
+});
+
+it.effect(
+  "unregisters a freshly initialized named folder when project creation is rejected",
+  () => {
+    const calls: string[] = [];
+    const removeCalls: string[] = [];
+    return withScratch(
+      () =>
+        withGitEnv(
+          TEST_IDENTITY,
+          Effect.gen(function* () {
+            const folders = yield* ManagedProjectFolders.ManagedProjectFolders;
+            const fs = yield* FileSystem.FileSystem;
+            yield* folders.createNamedProject({ name: "Rejected Rift" }).pipe(Effect.flip);
+            assert.lengthOf(calls, 1);
+            assert.deepEqual(removeCalls, calls);
+            assert.isFalse(yield* fs.exists(calls[0]!));
+          }),
+        ),
+      {
+        rift: { calls, removeCalls },
+        projects: (real) => ({
+          ...real,
+          create: (input) =>
+            Effect.fail(
+              new ProjectService.ProjectOperationError({
+                operation: "dispatch-project-command",
+                projectId: input.projectId,
+                cause: "store unavailable",
+              }),
+            ),
+        }),
+      },
+    );
+  },
+);
+
+it.effect("still adds a missing workspace when rift init fails", () => {
+  const calls: string[] = [];
+  return withScratch(
+    ({ baseDir }) =>
+      Effect.gen(function* () {
+        const projects = yield* ProjectService.ProjectService;
+        const path = yield* Path.Path;
+        const root = path.join(baseDir, "new");
+        const created = yield* projects.create({
+          commandId: CommandId.make("add:failed"),
+          projectId: ProjectId.make("add:failed"),
+          title: "Added",
+          workspaceRoot: root,
+          createWorkspaceRootIfMissing: true,
+        });
+        assert.equal(created.workspaceRoot, root);
+        assert.deepEqual(calls, [root]);
+      }),
+    { rift: { calls, failInit: true } },
+  );
+});
 
 it.effect("starts a named project as a committed repository, and suffixes a taken name", () =>
   withScratch(({ baseDir }) =>

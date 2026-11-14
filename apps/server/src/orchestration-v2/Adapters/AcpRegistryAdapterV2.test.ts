@@ -1562,8 +1562,18 @@ describe("AcpRegistryAdapterV2", () => {
       assert.deepEqual(
         childThreads.map((thread) => thread.contextUsage),
         [
-          { usedTokens: 2_500, maxTokens: 10_000, cost: { amount: 0.42, currency: "USD" } },
-          { usedTokens: 2_500, maxTokens: 10_000, cost: { amount: 0.42, currency: "USD" } },
+          {
+            usedTokens: 2_500,
+            maxTokens: 10_000,
+            cost: { amount: 0.42, currency: "USD" },
+            updatedAt: "1970-01-01T00:00:00.000Z",
+          },
+          {
+            usedTokens: 2_500,
+            maxTokens: 10_000,
+            cost: { amount: 0.42, currency: "USD" },
+            updatedAt: "1970-01-01T00:00:00.000Z",
+          },
         ],
       );
       assert.deepEqual(childThreads.at(-1)?.nativeMetadata, {

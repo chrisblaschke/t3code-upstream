@@ -162,6 +162,15 @@ export const LaunchEditorInput = Schema.Struct({
 });
 export type LaunchEditorInput = typeof LaunchEditorInput.Type;
 
+/** Open a tab in the host's own terminal app (kitty), optionally running a command there. */
+export const OpenExternalTerminalInput = Schema.Struct({
+  cwd: TrimmedNonEmptyString,
+  /** argv to run in the new tab; a shell stays open after it exits. Omit for a plain shell. */
+  command: Schema.optional(Schema.Array(Schema.String)),
+  title: Schema.optional(Schema.String),
+});
+export type OpenExternalTerminalInput = typeof OpenExternalTerminalInput.Type;
+
 const remoteSchemeOf = (editor: EditorDefinition): string | undefined =>
   editor.remoteScheme ?? (editor.jetbrainsProductCode === undefined ? undefined : "jetbrains");
 
@@ -318,6 +327,15 @@ export class ExternalLauncherEditorSpawnError extends Schema.TaggedError<Externa
   }
 }
 
+export class ExternalTerminalLaunchError extends Schema.TaggedError<ExternalTerminalLaunchError>()(
+  "ExternalTerminalLaunchError",
+  { detail: Schema.String },
+) {
+  override get message(): string {
+    return `Could not open the host terminal: ${this.detail}`;
+  }
+}
+
 export const ExternalLauncherError = Schema.Union([
   ExternalLauncherUnknownEditorError,
   ExternalLauncherUnsupportedEditorError,
@@ -325,5 +343,6 @@ export const ExternalLauncherError = Schema.Union([
   ExternalLauncherUnsupportedTargetError,
   ExternalLauncherBrowserSpawnError,
   ExternalLauncherEditorSpawnError,
+  ExternalTerminalLaunchError,
 ]);
 export type ExternalLauncherError = typeof ExternalLauncherError.Type;

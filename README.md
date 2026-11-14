@@ -1,3 +1,7 @@
+> This is a personal fork of [pingdotgg/t3code](https://github.com/pingdotgg/t3code) with Pi as a provider and fleet/delegation features. There is no support or release schedule. The `pi` branch is rebased and force-pushed.
+>
+> This is not an official T3 Code release. Upstream's installers install upstream T3 Code, not this fork. The original README follows.
+
 # T3 Code
 
 T3 Code is an "agent harness control surface". It enables control of the agents on your machine with a best-in-class mobile app ([iOS](https://apps.apple.com/us/app/t3-code-remote-claude-more/id6787819824), [Android](https://play.google.com/store/apps/details?id=com.t3tools.t3code)), [web app](https://app.t3.codes) and [Electron-based desktop app](https://t3.codes).

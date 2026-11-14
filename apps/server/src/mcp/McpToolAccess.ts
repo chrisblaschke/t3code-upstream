@@ -11,6 +11,7 @@ import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import * as Predicate from "effect/Predicate";
 import * as Ref from "effect/Ref";
+import * as Schema from "effect/Schema";
 import * as Struct from "effect/Struct";
 import type * as Layer from "effect/Layer";
 import type * as Scope from "effect/Scope";
@@ -364,6 +365,8 @@ const takesLinkedEnvironment = (tool: Tool.Any) => {
   );
 };
 
+const isMcpFailure = Schema.is(OrchestratorMcpFailure);
+
 const linksUnavailable = new OrchestratorMcpFailure({
   code: "orchestration_error",
   message: "This environment cannot reach linked environments.",
@@ -398,7 +401,75 @@ const routed = Effect.fn("McpToolAccess.routed")(function* <Tools extends Record
       Effect.gen(function* () {
         const scope = yield* McpInvocationContext.McpInvocationContext;
         const target = PeerForwarding.remoteTarget(scope, environmentId);
-        if (target === undefined) return yield* here(params);
+        if (target === undefined) {
+          if (
+            name !== "t3_thread_read" ||
+            environmentId !== undefined ||
+            scope.client?.linked === true ||
+            scope.linkedEnvironments === false ||
+            Option.isNone(forwarding)
+          ) {
+            return yield* here(params);
+          }
+          return yield* here(params).pipe(
+            Effect.catchIf(
+              (error): error is typeof error & OrchestratorMcpFailure =>
+                isMcpFailure(error) && error.code === "thread_not_found",
+              (error) =>
+                Effect.gen(function* () {
+                  const links = yield* forwarding.value.links(scope).pipe(Effect.result);
+                  // A linked caller may not be allowed to enumerate this machine's links.
+                  if (links._tag === "Failure") return yield* error;
+                  const reachable = links.success.links.filter(
+                    (link) => link.status === "reachable",
+                  );
+                  const unchecked = new Map<EnvironmentId, string>(
+                    links.success.links
+                      .filter((link) => link.status !== "reachable")
+                      .map((link) => [link.environmentId, link.status]),
+                  );
+                  const missing = () =>
+                    new OrchestratorMcpFailure({
+                      code: "thread_not_found",
+                      message: `Thread ${(params as { threadId?: string }).threadId} was not found here or in the linked environments. Checked: ${
+                        reachable
+                          .filter((link) => !unchecked.has(link.environmentId))
+                          .map((link) => `${link.label} (${link.environmentId})`)
+                          .join(", ") || "none"
+                      }. Could not check: ${
+                        links.success.links
+                          .filter((link) => unchecked.has(link.environmentId))
+                          .map(
+                            (link) =>
+                              `${link.label} (${link.environmentId}): ${unchecked.get(link.environmentId)}`,
+                          )
+                          .join(", ") || "none"
+                      }.`,
+                    });
+                  if (reachable.length === 0) return yield* missing();
+                  yield* (remote as RemoteCheck<typeof params>)(params);
+                  return yield* Effect.raceAll(
+                    reachable.map((link) =>
+                      forwarding.value
+                        .call(scope, tool, link.environmentId, {
+                          ...params,
+                          environmentId: link.environmentId,
+                        })
+                        .pipe(
+                          Effect.tapError((failure) =>
+                            Effect.sync(() => {
+                              if (failure.code !== "thread_not_found") {
+                                unchecked.set(link.environmentId, failure.message);
+                              }
+                            }),
+                          ),
+                        ),
+                    ),
+                  ).pipe(Effect.mapError(missing));
+                }),
+            ),
+          );
+        }
         if (scope.linkedEnvironments === false) return yield* PeerForwarding.linkedEnvironmentsOff;
         yield* (remote as RemoteCheck<typeof params>)(params);
         if (Option.isNone(forwarding)) return yield* linksUnavailable;

@@ -1,3 +1,4 @@
+import * as KeyedLock from "@t3tools/shared/KeyedLock";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -7,6 +8,7 @@ import * as Schema from "effect/Schema";
 
 import { expandHomePath } from "@t3tools/provider-core/server/pathExpansion";
 import * as HostProcess from "@t3tools/shared/HostProcess";
+import * as RiftWorkspaces from "../vcs/RiftWorkspaces.ts";
 
 export class WorkspaceRootNotExistsError extends Schema.TaggedError<WorkspaceRootNotExistsError>()(
   "WorkspaceRootNotExistsError",
@@ -85,7 +87,11 @@ export class WorkspacePaths extends Context.Service<
   {
     readonly normalizeWorkspaceRoot: (
       workspaceRoot: string,
-      options?: { readonly createIfMissing?: boolean },
+      options?: {
+        readonly createIfMissing?: boolean;
+        /** Disable for placeholders which must remain empty for git clone. */
+        readonly initializeWithRift?: boolean;
+      },
     ) => Effect.Effect<
       string,
       | WorkspaceRootNotExistsError
@@ -103,9 +109,14 @@ export class WorkspacePaths extends Context.Service<
   }
 >()("t3/workspace/WorkspacePaths") {}
 
-const make = Effect.gen(function* () {
+export const make = Effect.gen(function* () {
   const fileSystem = yield* FileSystem.FileSystem;
+  // Every creator normalizes before publishing. Even callers that see an
+  // existing directory must wait until its exclusive creator finishes init.
+  const initializationLocks = yield* KeyedLock.make<string>();
+  const homeDirectory = yield* HostProcess.HomeDirectory;
   const path = yield* Path.Path;
+  const rift = yield* RiftWorkspaces.RiftWorkspaces;
 
   const statWorkspaceRoot = Effect.fn("WorkspacePaths.statWorkspaceRoot")(function* (
     workspaceRoot: string,
@@ -132,46 +143,69 @@ const make = Effect.gen(function* () {
 
   const normalizeWorkspaceRoot: WorkspacePaths["Service"]["normalizeWorkspaceRoot"] = Effect.fn(
     "WorkspacePaths.normalizeWorkspaceRoot",
-  )(function* (workspaceRoot, options) {
-    const normalizedWorkspaceRoot = path.resolve(
-      expandHomePath(workspaceRoot.trim(), yield* HostProcess.HomeDirectory),
-    );
-    let workspaceStat = yield* statWorkspaceRoot(
-      workspaceRoot,
-      normalizedWorkspaceRoot,
-      "validate-existing",
-    );
-    if (!workspaceStat && options?.createIfMissing) {
-      yield* fileSystem.makeDirectory(normalizedWorkspaceRoot, { recursive: true }).pipe(
-        Effect.mapError(
-          (cause) =>
-            new WorkspaceRootCreateFailedError({
-              workspaceRoot,
-              normalizedWorkspaceRoot,
-              cause,
-            }),
-        ),
+  )(
+    function* (workspaceRoot, options) {
+      const normalizedWorkspaceRoot = path.resolve(
+        expandHomePath(workspaceRoot.trim(), homeDirectory),
       );
-      workspaceStat = yield* statWorkspaceRoot(
+      let workspaceStat = yield* statWorkspaceRoot(
         workspaceRoot,
         normalizedWorkspaceRoot,
-        "verify-created",
+        "validate-existing",
       );
-    }
-    if (!workspaceStat) {
-      return yield* new WorkspaceRootNotExistsError({
-        workspaceRoot,
-        normalizedWorkspaceRoot,
-      });
-    }
-    if (workspaceStat.type !== "Directory") {
-      return yield* new WorkspaceRootNotDirectoryError({
-        workspaceRoot,
-        normalizedWorkspaceRoot,
-      });
-    }
-    return normalizedWorkspaceRoot;
-  });
+      let created = false;
+      if (!workspaceStat && options?.createIfMissing) {
+        // mkdir -p cannot tell whether a concurrent creator won. Make parents
+        // first, then exclusively claim the leaf; only that winner may run init.
+        yield* Effect.gen(function* () {
+          yield* fileSystem.makeDirectory(path.dirname(normalizedWorkspaceRoot), {
+            recursive: true,
+          });
+          created = yield* fileSystem.makeDirectory(normalizedWorkspaceRoot).pipe(
+            Effect.as(true),
+            Effect.catchIf(
+              (cause) => cause.reason._tag === "AlreadyExists",
+              () => Effect.succeed(false),
+            ),
+          );
+        }).pipe(
+          Effect.mapError(
+            (cause) =>
+              new WorkspaceRootCreateFailedError({
+                workspaceRoot,
+                normalizedWorkspaceRoot,
+                cause,
+              }),
+          ),
+        );
+        workspaceStat = yield* statWorkspaceRoot(
+          workspaceRoot,
+          normalizedWorkspaceRoot,
+          "verify-created",
+        );
+      }
+      if (!workspaceStat) {
+        return yield* new WorkspaceRootNotExistsError({
+          workspaceRoot,
+          normalizedWorkspaceRoot,
+        });
+      }
+      if (workspaceStat.type !== "Directory") {
+        return yield* new WorkspaceRootNotDirectoryError({
+          workspaceRoot,
+          normalizedWorkspaceRoot,
+        });
+      }
+      if (created && options?.initializeWithRift !== false)
+        yield* rift.initializeNewFolder(normalizedWorkspaceRoot);
+      return normalizedWorkspaceRoot;
+    },
+    (effect, workspaceRoot) =>
+      initializationLocks.withLock(
+        path.resolve(expandHomePath(workspaceRoot.trim(), homeDirectory)),
+        effect,
+      ),
+  );
 
   const resolveRelativePathWithinRoot: WorkspacePaths["Service"]["resolveRelativePathWithinRoot"] =
     Effect.fn("WorkspacePaths.resolveRelativePathWithinRoot")(function* (input) {
@@ -210,4 +244,4 @@ const make = Effect.gen(function* () {
   return WorkspacePaths.of({ normalizeWorkspaceRoot, resolveRelativePathWithinRoot });
 });
 
-export const layer = Layer.effect(WorkspacePaths, make);
+export const layer = Layer.effect(WorkspacePaths, make).pipe(Layer.provide(RiftWorkspaces.layer));

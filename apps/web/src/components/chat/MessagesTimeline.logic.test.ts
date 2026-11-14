@@ -31,6 +31,11 @@ import {
   resolveAssistantMessageCopyState,
   type MessagesTimelineRow,
   workEntryDisplayLabel,
+  flattenVisibleWorkEntryRows,
+  shouldFollowWorkGroupAppend,
+  workEntryChildEntries,
+  nestChildWorkEntries,
+  workEntryIsVisibleInGroup,
 } from "./MessagesTimeline.logic";
 
 describe("resolveAssistantMessageCopyState", () => {
@@ -189,6 +194,62 @@ describe("deriveMessagesTimelineRows", () => {
       );
     },
   );
+  it("lists every settled step on its own row in the terminal transcript", () => {
+    const message = (id: string, role: "user" | "assistant", at: string) => ({
+      id: `${id}-entry`,
+      kind: "message" as const,
+      createdAt: at,
+      message: {
+        id: id as never,
+        role,
+        text: id,
+        runId: role === "user" ? null : ("turn-1" as never),
+        createdAt: at,
+        updatedAt: at,
+        streaming: false,
+      },
+    });
+    const work = (id: string, at: string) => ({
+      id: `${id}-entry`,
+      kind: "work" as const,
+      createdAt: at,
+      entry: {
+        id,
+        createdAt: at,
+        runId: "turn-1" as never,
+        label: "Ran command",
+        tone: "tool" as const,
+      },
+    });
+    const timelineEntries = [
+      message("user-1", "user", "2026-01-01T00:00:00Z"),
+      message("assistant-first", "assistant", "2026-01-01T00:00:05Z"),
+      work("work-1", "2026-01-01T00:00:08Z"),
+      work("work-2", "2026-01-01T00:00:09Z"),
+      message("assistant-final", "assistant", "2026-01-01T00:00:20Z"),
+    ];
+    const base = {
+      timelineEntries,
+      isWorking: false,
+      activeTurnStartedAt: null,
+      turnDiffSummaries: [],
+      supportsConversationRollback: false,
+    };
+
+    expect(deriveMessagesTimelineRows(base).map((row) => row.kind)).toContain("turn-fold");
+    const rows = deriveMessagesTimelineRows({ ...base, terminal: true });
+    const compact = deriveMessagesTimelineRowsWithState(base);
+    expect(deriveMessagesTimelineRowsWithState({ ...base, terminal: true }, compact).rows).toEqual(
+      rows,
+    );
+    expect(rows.map((row) => `${row.kind}:${row.id}`)).toEqual([
+      "message:user-1-entry",
+      "message:assistant-first-entry",
+      "work:work-1-entry",
+      "work:work-2-entry",
+      "message:assistant-final-entry",
+    ]);
+  });
 
   it("stops stranded thinking after a steer and follows the next thought or tool", () => {
     const runId = RunId.make("steered-run");
@@ -4029,6 +4090,63 @@ describe("linked timeline resources", () => {
     },
   );
 
+  it("shows a helper card instead of the delegate call it names, unless the call failed", () => {
+    const card = (id: string, callId: string) => {
+      const entry = event(id, "subagent");
+      return {
+        ...entry,
+        projectedItem: {
+          item: { ...entry.projectedItem.item, origin: "provider_native", parentItemId: callId },
+        } as OrchestrationV2ProjectedTurnItem,
+      };
+    };
+    const call = (id: string, failed = false): TimelineEntry => ({
+      id,
+      kind: "work",
+      createdAt: "2026-09-08T10:00:02Z",
+      entry: {
+        id,
+        runId,
+        createdAt: "2026-09-08T10:00:02Z",
+        label: "Delegate",
+        tone: failed ? "error" : "tool",
+        itemType: "dynamic_tool",
+        toolLifecycleStatus: failed ? "failed" : "completed",
+        projectedItem: {
+          item: {
+            id,
+            runId,
+            type: "dynamic_tool",
+            status: failed ? "failed" : "completed",
+            toolName: "delegate",
+          },
+        } as OrchestrationV2ProjectedTurnItem,
+      },
+    });
+    const rows = deriveMessagesTimelineRows({
+      ...common,
+      timelineEntries: [
+        call("fan-out"),
+        card("helper-a", "fan-out"),
+        card("helper-b", "fan-out"),
+        call("status-check"),
+        call("failed", true),
+        card("helper-c", "failed"),
+      ],
+      expandedRunIds: new Set([runId]),
+    });
+    const visibleTools = rows.flatMap((row) =>
+      row.kind === "work" || row.kind === "work-live"
+        ? row.groupedEntries.map((entry) => entry.id)
+        : [],
+    );
+    expect(visibleTools).toEqual(["status-check", "failed"]);
+    expect(rows.find((row) => row.id === "helper-a")).toMatchObject({
+      subagents: [{ item: { id: "helper-a" } }, { item: { id: "helper-b" } }],
+    });
+    expect(rows.find((row) => row.id === "helper-c")).toBeDefined();
+  });
+
   it("keeps created-chat summaries after the final answer and folds only their timeline rows", () => {
     const timelineEntries = [
       {
@@ -4774,6 +4892,210 @@ describe("subagent continued by a later turn", () => {
       "prompt-2",
       `turn-fold:${run2}`,
       "closing-2",
+    ]);
+  });
+});
+
+describe("nested tool calls", () => {
+  const runId = RunId.make("nested-run");
+  const time = (second: number) => new Date(Date.UTC(2026, 0, 1, 0, 0, second)).toISOString();
+  const work = (
+    id: string,
+    second: number,
+    parentItemId: string | null,
+    overrides: Partial<Extract<TimelineEntry, { kind: "work" }>["entry"]> = {},
+  ): TimelineEntry => ({
+    kind: "work",
+    id,
+    createdAt: time(second),
+    entry: {
+      id,
+      runId,
+      createdAt: time(second),
+      label: id,
+      command: `echo ${id}`,
+      tone: "tool",
+      itemType: "command_execution",
+      toolLifecycleStatus: "completed",
+      structuredPayload: { parentItemId } as never,
+      ...overrides,
+    },
+  });
+  const prompt: TimelineEntry = {
+    kind: "message",
+    id: "prompt",
+    createdAt: time(0),
+    message: {
+      id: MessageId.make("prompt"),
+      role: "user",
+      text: "go",
+      runId,
+      createdAt: time(0),
+      updatedAt: time(0),
+      streaming: false,
+    },
+  };
+  const derive = (
+    timelineEntries: TimelineEntry[],
+    expandedWorkGroupIds: ReadonlySet<string> = new Set(),
+  ) =>
+    deriveMessagesTimelineRows({
+      timelineEntries,
+      latestRun: { runId, status: "running", startedAt: time(0), completedAt: null },
+      isWorking: false,
+      expandedWorkGroupIds,
+      turnDiffSummaries: [],
+      supportsConversationRollback: false,
+    });
+
+  it("shows completed child details while the terminal parent is still running", () => {
+    const rows = deriveMessagesTimelineRows({
+      timelineEntries: [
+        prompt,
+        work("codemode", 1, null, { itemType: "dynamic_tool", toolLifecycleStatus: "inProgress" }),
+        work("codemode/1", 2, "codemode", { detail: "child output" }),
+      ],
+      latestRun: { runId, status: "running", startedAt: time(0), completedAt: null },
+      isWorking: true,
+      terminal: true,
+      turnDiffSummaries: [],
+      supportsConversationRollback: false,
+    });
+    expect(rows.find((row) => row.kind === "work-live")).toMatchObject({ expanded: true });
+    const details = rows.find((row) => row.kind === "work" && row.isExpandedToolGroup);
+    expect(
+      details?.kind === "work" && workEntryChildEntries(details.groupedEntries[0]!),
+    ).toMatchObject([{ id: "codemode/1", detail: "child output" }]);
+  });
+
+  it("folds a codemode call and its nested calls into one group", () => {
+    const entries = [
+      prompt,
+      work("codemode", 1, null, { itemType: "dynamic_tool", label: "codemode" }),
+      work("codemode/1", 2, "codemode"),
+      work("codemode/2", 3, "codemode", { toolLifecycleStatus: "failed" }),
+    ];
+    const toggle = derive(entries).find((row) => row.kind === "work-toggle");
+    expect(toggle).toMatchObject({ hiddenCount: 3, hasFailure: true });
+
+    const details = derive(entries, new Set(["work-group:codemode"])).find(
+      (row) => row.kind === "work" && row.isExpandedToolGroup,
+    );
+    expect(details?.kind === "work" && details.groupedEntries.map((entry) => entry.id)).toEqual([
+      "codemode",
+    ]);
+    expect(
+      details?.kind === "work" &&
+        workEntryChildEntries(details.groupedEntries[0]!).map((entry) => entry.id),
+    ).toEqual(["codemode/1", "codemode/2"]);
+  });
+
+  const expandedRows = (entries: TimelineEntry[]) => {
+    const details = derive(entries, new Set(["work-group:codemode"])).find(
+      (row) => row.kind === "work" && row.isExpandedToolGroup,
+    );
+    return details?.kind === "work"
+      ? flattenVisibleWorkEntryRows(
+          details.groupedEntries.filter((entry) => workEntryIsVisibleInGroup(entry, true)),
+        )
+      : [];
+  };
+
+  it("gives each nested call its own indented list row, in order", () => {
+    const rows = expandedRows([
+      prompt,
+      work("codemode", 1, null, { itemType: "dynamic_tool", label: "codemode" }),
+      work("codemode/1", 2, "codemode", { itemType: "dynamic_tool" }),
+      work("codemode/1/1", 3, "codemode/1"),
+      work("codemode/2", 4, "codemode"),
+    ]);
+    expect(rows.map(({ id, depth }) => [id, depth])).toEqual([
+      ["codemode", 0],
+      ["codemode/1", 1],
+      ["codemode/1/1", 2],
+      ["codemode/2", 1],
+    ]);
+  });
+
+  it("follows a nested call appended at the end, not a nested status update", () => {
+    const base = [
+      prompt,
+      work("codemode", 1, null, {
+        itemType: "dynamic_tool",
+        label: "codemode",
+        toolLifecycleStatus: "inProgress",
+      }),
+      work("codemode/1", 2, "codemode", { toolLifecycleStatus: "inProgress" }),
+    ];
+    const before = expandedRows(base);
+    const appended = expandedRows([
+      ...base.slice(0, 2),
+      work("codemode/1", 2, "codemode"),
+      work("codemode/2", 3, "codemode", { toolLifecycleStatus: "inProgress" }),
+    ]);
+    const updated = expandedRows([
+      ...base.slice(0, 2),
+      work("codemode/1", 2, "codemode", { toolLifecycleStatus: "failed" }),
+    ]);
+    expect(shouldFollowWorkGroupAppend(before, appended, 0)).toBe(true);
+    expect(shouldFollowWorkGroupAppend(before, updated, 0)).toBe(false);
+  });
+
+  it("does not nest approval or compaction rows under tools", () => {
+    const entries = [
+      work("codemode", 1, null, { itemType: "dynamic_tool" }),
+      work("approval", 2, "codemode", { itemType: "approval_request" }),
+      work("compaction", 3, "codemode", { itemType: "compaction" }),
+    ];
+    expect(nestChildWorkEntries(entries)).toBe(entries);
+  });
+
+  it("keeps cyclic and cross-run parents flat", () => {
+    const entries = [
+      work("before-cycle", 0, "a"),
+      work("a", 1, "b"),
+      work("b", 2, "a"),
+      work("other-run", 3, "a", { runId: RunId.make("another-run") }),
+      work("after-cycle", 4, "b"),
+      work("deeper", 5, "after-cycle"),
+    ];
+    expect(nestChildWorkEntries(entries)).toBe(entries);
+    const rooted = [
+      ...entries,
+      work("leaf", 6, "middle"),
+      work("middle", 7, "root"),
+      work("sibling", 8, "middle"),
+      work("root", 9, "root"),
+    ];
+    const nested = nestChildWorkEntries(rooted);
+    expect(nested.slice(0, entries.length)).toEqual(entries);
+    const root = nested.at(-1)!;
+    expect(root.kind === "work" && root.entry).toMatchObject({
+      id: "root",
+      childEntries: [{ id: "middle", childEntries: [{ id: "leaf" }, { id: "sibling" }] }],
+    });
+  });
+
+  it("checks duplicate IDs against their own parent before following canonical ancestors", () => {
+    const entries = [work("a", 1, "b"), work("b", 2, "a"), work("a", 3, null)];
+    const nested = nestChildWorkEntries(entries);
+    expect(nested).toHaveLength(2);
+    for (const entry of nested) {
+      expect(entry.kind === "work" && entry.entry).toMatchObject({
+        id: "a",
+        childEntries: [{ id: "b" }],
+      });
+    }
+  });
+
+  it("keeps calls flat when their parent is not in the timeline", () => {
+    const details = derive(
+      [prompt, work("orphan/1", 1, "orphan"), work("orphan/2", 2, "orphan")],
+      new Set(["work-group:orphan/1"]),
+    ).find((row) => row.kind === "work" && row.isExpandedToolGroup);
+    expect(details?.kind === "work" && details.groupedEntries.map((entry) => entry.id)).toEqual([
+      "orphan/1",
+      "orphan/2",
     ]);
   });
 });

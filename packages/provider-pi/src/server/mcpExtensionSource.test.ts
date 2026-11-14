@@ -6,7 +6,15 @@ import * as NodeModule from "node:module";
 import * as NodeVM from "node:vm";
 import { assert, describe, it } from "@effect/vitest";
 
-import { PI_T3_MCP_EXTENSION_SOURCE, PI_T3_SERVICE_TIER_COMMAND } from "./mcpExtensionSource.ts";
+import { T3_CODE_ORCHESTRATION_INSTRUCTIONS } from "@t3tools/provider-core/server/orchestrationInstructions";
+
+import {
+  PI_T3_SERVICE_TIER_COMMAND,
+  PI_T3_DEFERRED_NOTE,
+  PI_T3_FORK_BEFORE_BASH_COMMAND,
+  PI_T3_MCP_EXTENSION_SOURCE,
+  T3_PI_ROLLBACK_NONCE_ENV,
+} from "./mcpExtensionSource.ts";
 import { loadMcpBridge } from "./mcpBridge.testkit.ts";
 
 type RequestHook = (
@@ -29,6 +37,8 @@ type InputHook = (
 
 async function loadHooks(
   commands: ReadonlyArray<SkillCommand> = [],
+  env: Record<string, string> = {},
+  registerCommand: (name: string, command: unknown) => void = () => undefined,
   argv: ReadonlyArray<string> = [],
 ) {
   const handlers = new Map<string, unknown>();
@@ -39,13 +49,13 @@ async function loadHooks(
     ),
   );
   await NodeVM.runInNewContext(`${source}\nt3McpExtension(pi)`, {
-    process: { env: {}, argv },
+    process: { env, argv },
     NodeFSP,
     NodePath,
     stripFrontmatter: (content: string) => content,
     pi: {
+      registerCommand,
       on: (name: string, handler: unknown) => handlers.set(name, handler),
-      registerCommand: () => {},
       getCommands: () => commands,
     },
   });
@@ -53,6 +63,29 @@ async function loadHooks(
 }
 
 describe("Pi orchestration prompt section", () => {
+  it("uses shared policy in a structured section with Pi discovery instead of late loading", async () => {
+    const bridge = await loadMcpBridge();
+    const sections: Record<string, string> = { user_owned: "Keep this section" };
+    const result = await bridge.handlers.get("before_agent_start")!(
+      { systemPrompt: "base", systemPromptOptions: { sections } },
+      { ui: { notify: assert.fail } },
+    );
+    assert.isUndefined(result);
+    assert.equal(sections.user_owned, "Keep this section");
+    const instructions = sections.t3_code_orchestration!;
+    assert.include(instructions, PI_T3_DEFERRED_NOTE);
+    assert.include(instructions, "mcp__t3-code__<name>");
+    assert.include(instructions, "tool_search");
+    // Every shared rule survives; only the bridge's discovery mechanism changes.
+    assert.equal(
+      instructions.replace(
+        PI_T3_DEFERRED_NOTE,
+        "T3 tools may load late. Try the name once before you call it absent.",
+      ),
+      T3_CODE_ORCHESTRATION_INSTRUCTIONS.trim(),
+    );
+  });
+
   it.each([
     {
       name: "on Pi builds without prompt sections",
@@ -97,7 +130,7 @@ describe("Pi project trust", () => {
     };
     // Pi reruns extension factories on session replacement without asking about trust again.
     for (const _session of [1, 2]) {
-      const handlers = (await loadHooks([], ["node", "pi", ...argv])) as Map<
+      const handlers = (await loadHooks([], {}, undefined, ["node", "pi", ...argv])) as Map<
         string,
         (event: unknown, ctx: unknown) => unknown
       >;
@@ -106,6 +139,96 @@ describe("Pi project trust", () => {
     assert.equal(sent.length, notices * 2);
     for (const message of sent)
       assert.include(message, "for /repo because the folder is not trusted");
+  });
+});
+
+describe("Pi bash rollback command", () => {
+  async function loadRollbackCommand() {
+    let handler!: (args: string, ctx: unknown) => Promise<void>;
+    await loadHooks([], { [T3_PI_ROLLBACK_NONCE_ENV]: "adapter-nonce" }, (name, command) => {
+      if (name === PI_T3_FORK_BEFORE_BASH_COMMAND) {
+        handler = (command as { handler: typeof handler }).handler;
+      }
+    });
+    return handler;
+  }
+
+  it.each(["previous-leaf", null])(
+    "forks at the bash parent %s or starts at root",
+    async (parentId) => {
+      const handler = await loadRollbackCommand();
+      const calls: Array<unknown> = [];
+      await handler("adapter-nonce bash-entry", {
+        sessionManager: {
+          getEntry: (id: string) => {
+            assert.equal(id, "bash-entry");
+            return { type: "message", message: { role: "bashExecution" }, parentId };
+          },
+          getSessionFile: () => "/tmp/original.jsonl",
+        },
+        fork: async (...args: unknown[]) => {
+          calls.push(["fork", ...args]);
+          return { cancelled: false };
+        },
+        newSession: async (...args: unknown[]) => {
+          calls.push(["new", ...args]);
+          return { cancelled: false };
+        },
+      });
+      assert.equal(
+        JSON.stringify(calls),
+        JSON.stringify([
+          parentId
+            ? ["fork", parentId, { position: "at" }]
+            : ["new", { parentSession: "/tmp/original.jsonl" }],
+        ]),
+      );
+    },
+  );
+
+  it("ignores unauthenticated, malformed and non-bash requests", async () => {
+    const handler = await loadRollbackCommand();
+    const ctx = {
+      sessionManager: {
+        getEntry: (id: string) => ({
+          type: "message",
+          message: { role: id === "user-entry" ? "user" : "bashExecution" },
+          parentId: "parent",
+        }),
+      },
+      fork: () => assert.fail("Must not fork"),
+      newSession: () => assert.fail("Must not replace the session"),
+    };
+    for (const args of [
+      "",
+      "bash-entry",
+      "wrong-nonce bash-entry",
+      "adapter-nonce user-entry",
+      "adapter-nonce bash-entry extra",
+    ]) {
+      await handler(args, ctx);
+    }
+  });
+
+  it.each(["parent", null])("reports cancelled rollback at %s", async (parentId) => {
+    const handler = await loadRollbackCommand();
+    let failure: unknown;
+    try {
+      await handler("adapter-nonce bash-entry", {
+        sessionManager: {
+          getEntry: () => ({ type: "message", message: { role: "bashExecution" }, parentId }),
+          getSessionFile: () => "/tmp/original.jsonl",
+        },
+        fork: async () => ({ cancelled: true }),
+        newSession: async () => ({ cancelled: true }),
+      });
+    } catch (error) {
+      failure = error;
+    }
+    assert.equal(
+      (failure as Error | undefined)?.message,
+      "A Pi extension cancelled the session fork",
+    );
   });
 });
 
@@ -163,6 +286,36 @@ describe("Pi MCP tool results", () => {
 });
 
 describe("Pi MCP tool exposure", () => {
+  it("exposes the eight core tools directly and leaves optional tools behind discovery", async () => {
+    const extraTools = [
+      "t3_thread_list",
+      "t3_thread_read",
+      "t3_thread_search",
+      "html_preview",
+      "html_render",
+    ];
+    const bridge = await loadMcpBridge({ modern: true, toolSearchAvailable: true, extraTools });
+    await bridge.handlers.get("session_start")!(
+      { systemPrompt: "" },
+      { model: { api: "anthropic-messages" }, ui: { notify: assert.fail } },
+    );
+    const direct = bridge.tools.filter((tool) => tool.exposure === "direct");
+    assert.sameMembers(
+      direct.map((tool) => tool.name),
+      ["orchestrator_capabilities", "delegate_task", "task_status", ...extraTools].map(
+        (name) => `mcp__t3-code__${name}`,
+      ),
+    );
+    for (const tool of direct) {
+      assert.include(PI_T3_DEFERRED_NOTE, `\`${tool.name.replace("mcp__t3-code__", "")}\``);
+    }
+    assert.equal(
+      bridge.tools.find((tool) => tool.name === "mcp__t3-code__preview_snapshot")?.exposure,
+      "deferred",
+    );
+    assert.notInclude(PI_T3_DEFERRED_NOTE, "preview_snapshot");
+    assert.equal(bridge.tools.filter((tool) => tool.exposure === "hidden").length, 9);
+  });
   const discoveryContext = {
     model: { api: "anthropic-messages" },
     ui: { notify: () => undefined },
@@ -367,10 +520,10 @@ describe("Pi tool discovery permissions", () => {
     await NodeVM.runInNewContext(`${source}\nt3McpExtension(pi)`, {
       process: { env: { T3_PI_RUNTIME_MODE: "approval-required" } },
       pi: {
+        registerCommand: () => undefined,
         on: (name: string, handler: ToolCallHook) => {
           if (name === "tool_call") toolCall = handler;
         },
-        registerCommand: () => {},
         getAllTools: () => [{ name: "tool_search", sourceInfo: { path: searchPath } }],
       },
     });

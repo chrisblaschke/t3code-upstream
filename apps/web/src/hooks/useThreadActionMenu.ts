@@ -63,9 +63,11 @@ export function useThreadActionMenu(input: {
   readonly projectCwd: string | null;
   readonly onStartRename: () => void;
   readonly onFind?: ((threadRef: ScopedThreadRef) => void) | undefined;
+  readonly onOpenPiTerminal?: (() => void) | undefined;
   readonly canShareWithGuest: boolean;
 }) {
-  const { threadRef, projectCwd, onStartRename, onFind, canShareWithGuest } = input;
+  const { threadRef, projectCwd, onStartRename, onFind, canShareWithGuest, onOpenPiTerminal } =
+    input;
   const router = useRouter();
   const projects = useProjects();
   const primaryEnvironmentId = usePrimaryEnvironmentId();
@@ -140,6 +142,7 @@ export function useThreadActionMenu(input: {
         canOperate: readEnvironmentScope(threadRef.environmentId, AuthOrchestrationOperateScope),
         canFind: onFind !== undefined,
         branch: thread.branch ?? null,
+        canOpenPiTerminal: onOpenPiTerminal !== undefined,
         projectFilter: null,
         isPinned: thread.pinnedAt != null,
         isSettled: supports.settlement && thread.settledOverride === "settled",
@@ -249,6 +252,9 @@ export function useThreadActionMenu(input: {
           return;
         case "rename":
           onStartRename();
+          return;
+        case "open-pi-terminal":
+          onOpenPiTerminal?.();
           return;
         case "regenerate-title":
           if (isRegeneratingTitle) return;

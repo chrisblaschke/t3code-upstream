@@ -15,6 +15,23 @@ import { backgroundWorkNotification, notificationTurnItem } from "./notification
 const childThreadId = ThreadId.make("thread:child");
 
 describe("backgroundWorkNotification", () => {
+  it("retains every launching run when completions are batched", () => {
+    const a = RunId.make("run:a");
+    const b = RunId.make("run:b");
+    const report = { kind: "background_task" as const, outcome: "completed" as const };
+    assert.deepEqual(
+      backgroundWorkNotification([
+        { ...report, originRunId: a },
+        { ...report, originRunId: b },
+        { ...report, originRunId: a },
+      ]).originRunIds,
+      [a, b],
+    );
+    // An unknown report cannot be silently attributed to the known origins.
+    assert.isUndefined(
+      backgroundWorkNotification([{ ...report, originRunId: a }, report]).originRunIds,
+    );
+  });
   it("names one piece of work and the thread of a subagent", () => {
     assert.deepEqual(
       backgroundWorkNotification([

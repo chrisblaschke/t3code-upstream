@@ -102,6 +102,51 @@ runVcsDriverContractSuite<GitVcsDriver.GitVcsDriver, GitContractError>({
   },
 });
 
+it.effect("excludes an existing Rift marker when initializing Git", () =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const cwd = yield* fs.makeTempDirectoryScoped({ prefix: "rift-git-init-" });
+    yield* fs.writeFileString(`${cwd}/.rift`, "machine-local-id");
+    const driver = yield* GitVcsDriver.makeVcsDriverShape();
+    yield* driver.initRepository({ cwd, kind: "git" });
+    yield* runGit(cwd, ["add", "--all"]);
+    const git = yield* GitVcsDriver.GitVcsDriver;
+    const staged = yield* git.execute({
+      operation: "test",
+      cwd,
+      args: ["diff", "--cached", "--name-only"],
+    });
+    assert.equal(staged.stdout.trim(), "");
+    yield* runGit(cwd, ["check-ignore", ".rift"]);
+  }).pipe(Effect.scoped, Effect.provide(layerGitContract)),
+);
+
+it.effect("excludes Rift markers with an empty Git initialization template", () =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const cwd = yield* fs.makeTempDirectoryScoped({ prefix: "rift-git-empty-template-" });
+    const template = yield* fs.makeTempDirectoryScoped({ prefix: "git-empty-template-" });
+    yield* fs.writeFileString(`${cwd}/.rift`, "machine-local-id");
+    const process = yield* VcsProcess.VcsProcess;
+    const driver = yield* GitVcsDriver.makeVcsDriverShape().pipe(
+      Effect.provideService(VcsProcess.VcsProcess, {
+        run: (input) =>
+          process.run({ ...input, env: { ...input.env, GIT_TEMPLATE_DIR: template } }),
+      }),
+    );
+    yield* driver.initRepository({ cwd, kind: "git" });
+    assert.equal(yield* fs.readFileString(`${cwd}/.git/info/exclude`), "\n/.rift\n");
+    yield* runGit(cwd, ["add", "--all"]);
+    const staged = yield* driver.execute({
+      operation: "test",
+      cwd,
+      args: ["diff", "--cached", "--name-only"],
+    });
+    assert.equal(staged.stdout.trim(), "");
+    yield* runGit(cwd, ["check-ignore", ".rift"]);
+  }).pipe(Effect.scoped, Effect.provide(layerGitContract)),
+);
+
 it.effect("lists the fetch and push URLs of a partial clone remote", () =>
   Effect.gen(function* () {
     const fileSystem = yield* FileSystem.FileSystem;

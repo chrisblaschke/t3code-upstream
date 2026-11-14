@@ -46,6 +46,8 @@ import {
 import { cn } from "~/lib/utils";
 import { formatUpcomingTimestamp } from "../../timestampFormat";
 import { FetchedToolOutput, V2ItemInspector } from "./V2ItemInspector";
+import { terminalOutputKind } from "@t3tools/client-runtime/work-log/terminal-output";
+import { TerminalOutputPreview } from "./TerminalOutputPreview";
 import { SubagentNotificationLink } from "./V2LifecycleRow";
 import {
   TimelineRowCtx,
@@ -326,8 +328,14 @@ function WorkEntryLogRow(props: WorkEntryRowProps) {
   const questionHeading = workEntry.questionAnswer
     ? getQuestionTextPreview(workEntry.questionAnswer)
     : "";
+  const terminal = ctx.terminalTranscript;
+  // Terminal transcript: thinking, images and output read inline, unexpanded.
+  const showInline = expanded || terminal;
+  const terminalItem = terminal ? workEntry.projectedItem?.item : undefined;
+  const terminalKind = terminalItem ? terminalOutputKind(terminalItem) : null;
+  const wrapToolLabel = terminal && !isReasoning && workLogEntryIsToolLike(workEntry);
   const previewText =
-    isReasoning && expanded
+    isReasoning && showInline
       ? workEntry.toolLifecycleStatus === "inProgress"
         ? "Thinking"
         : "Thought"
@@ -440,6 +448,7 @@ function WorkEntryLogRow(props: WorkEntryRowProps) {
       data-v2-item-type={workEntry.projectedItem?.item.type}
       data-v2-item-visibility={workEntry.projectedItem?.visibility}
       {...rowToggleProps}
+      wrapLabel={wrapToolLabel}
       icon={
         <span
           className={iconWrapperClass}
@@ -458,9 +467,13 @@ function WorkEntryLogRow(props: WorkEntryRowProps) {
         <div className="min-w-0 flex-1 overflow-hidden">
           <p className="flex min-w-0 w-full items-baseline gap-1.5 text-sm leading-relaxed">
             <span
-              className={cn(answerPreview ? "min-w-0" : "min-w-0 flex-1", "truncate", headingClass)}
+              className={cn(
+                answerPreview ? "min-w-0" : "min-w-0 flex-1",
+                wrapToolLabel ? "whitespace-pre-wrap break-words" : "truncate",
+                headingClass,
+              )}
             >
-              {isReasoning && !expanded ? (
+              {isReasoning && !showInline ? (
                 <ChatMarkdown
                   inline
                   text={(workEntry.detail ?? previewText).slice(
@@ -553,7 +566,7 @@ function WorkEntryLogRow(props: WorkEntryRowProps) {
         </>
       }
     >
-      {expanded && viewedImage && threadRef ? (
+      {showInline && viewedImage && threadRef ? (
         <WorkLogDetails kind="media">
           <ChatMarkdownAssetImage
             environmentId={threadRef.environmentId}
@@ -569,7 +582,7 @@ function WorkEntryLogRow(props: WorkEntryRowProps) {
       {expanded && workEntry.questionAnswer ? (
         <QuestionAnswerHistory answer={workEntry.questionAnswer} />
       ) : null}
-      {expanded && isReasoning ? <ReasoningTraceContent entries={[workEntry]} /> : null}
+      {showInline && isReasoning ? <ReasoningTraceContent entries={[workEntry]} /> : null}
       {expanded &&
       !isReasoning &&
       !workEntry.questionAnswer &&
@@ -606,6 +619,15 @@ function WorkEntryLogRow(props: WorkEntryRowProps) {
             </>
           )}
         </WorkLogDetails>
+      ) : null}
+      {workEntry.projectedItem && terminalKind ? (
+        <TerminalOutputPreview
+          environmentId={ctx.activeThreadEnvironmentId}
+          projectedItem={workEntry.projectedItem}
+          source={ctx.turnItemSource}
+          kind={terminalKind}
+          onImageExpand={ctx.onImageExpand}
+        />
       ) : null}
     </WorkLogRow>
   );

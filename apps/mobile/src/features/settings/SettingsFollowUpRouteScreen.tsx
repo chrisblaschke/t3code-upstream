@@ -4,6 +4,7 @@ import { AsyncResult } from "effect/reactivity";
 import { Platform } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
+import { DEFAULT_TRANSCRIPT_MODE } from "@t3tools/contracts";
 import { AppText as Text } from "../../components/ui/AppText";
 import { DEFAULT_FOLLOW_UP_BEHAVIOR, type FollowUpBehavior } from "../../lib/followUpBehavior";
 import { mobilePreferencesAtom, updateMobilePreferencesAtom } from "../../state/preferences";
@@ -45,6 +46,26 @@ export function SettingsFollowUpRouteScreen() {
       contentContainerClassName="gap-3 px-5 pt-4"
       contentContainerStyle={{ paddingBottom: Math.max(insets.bottom, 18) + 18 }}
     >
+      <SettingsSection title="Transcript">
+        {(["terminal", "compact"] as const).map((mode, index) => (
+          <SettingsChoiceRow
+            key={mode}
+            label={mode === "terminal" ? "Terminal" : "Compact"}
+            description={
+              mode === "terminal"
+                ? "Show every step and its output inline."
+                : "Fold finished work into expandable summaries."
+            }
+            selected={
+              AsyncResult.isSuccess(preferencesResult) &&
+              (preferencesResult.value.transcriptMode ?? DEFAULT_TRANSCRIPT_MODE) === mode
+            }
+            separated={index > 0}
+            disabled={!preferencesReady}
+            onPress={() => savePreferences({ transcriptMode: mode })}
+          />
+        ))}
+      </SettingsSection>
       <SettingsSection title="While the agent is running">
         {FOLLOW_UP_OPTIONS.map((option, index) => (
           <SettingsChoiceRow

@@ -25,6 +25,7 @@ import * as Schema from "effect/Schema";
 import * as ServerConfig from "../config.ts";
 import * as GitWorkflow from "../git/GitWorkflowService.ts";
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
+import * as RiftWorkspaces from "../vcs/RiftWorkspaces.ts";
 import * as ProjectService from "./ProjectService.ts";
 
 export class ScratchUnavailableError extends Schema.TaggedError<ScratchUnavailableError>()(
@@ -227,6 +228,7 @@ const make = Effect.gen(function* () {
   const git = yield* GitVcsDriver.GitVcsDriver;
   const projects = yield* ProjectService.ProjectService;
   const random = yield* SecureRandom.SecureRandom;
+  const rift = yield* RiftWorkspaces.RiftWorkspaces;
 
   // Non-recursive mkdir atomically claims a name; racers move on after AlreadyExists.
   const claimFreeFolder = Effect.fnUntraced(function* <E>(
@@ -446,9 +448,12 @@ const make = Effect.gen(function* () {
     "ManagedProjectFolders.createNamedProject",
   )(function* (input) {
     const workspaceRoot = yield* claimNamedFolder(input.name);
-    const removeFolder = fileSystem.remove(workspaceRoot, { recursive: true }).pipe(Effect.ignore);
+    const removeFolder = rift
+      .unregisterNewFolder(workspaceRoot)
+      .pipe(Effect.andThen(fileSystem.remove(workspaceRoot, { recursive: true })), Effect.ignore);
     const prepared = yield* Effect.all([
       scaffoldRepository(workspaceRoot, input.name).pipe(
+        Effect.tap(() => rift.initializeNewFolder(workspaceRoot)),
         Effect.mapError((cause) => new NamedProjectFolderError({ folder: workspaceRoot, cause })),
       ),
       random
@@ -492,4 +497,6 @@ const make = Effect.gen(function* () {
   });
 });
 
-export const layer = Layer.effect(ManagedProjectFolders, make);
+export const layer = Layer.effect(ManagedProjectFolders, make).pipe(
+  Layer.provide(RiftWorkspaces.layer),
+);

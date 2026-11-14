@@ -1,5 +1,5 @@
 import { TimelinePendingApprovalRow } from "./TimelinePendingApprovalRow";
-import { WorkLogButton, WorkLogList, WorkLogRow } from "./WorkLog";
+import { WorkLogButton, WorkLogIndent, WorkLogList, WorkLogRow } from "./WorkLog";
 import type { WorktreeSetupSnapshot } from "@t3tools/contracts";
 import { type ToolActivityIcon } from "@t3tools/contracts";
 import { liveThoughtLine } from "@t3tools/client-runtime/work-log/presentation";
@@ -15,10 +15,12 @@ import { Minimize2Icon, XIcon } from "lucide-react";
 import { Button } from "../ui/button";
 import { getVirtualizedScrollFadeClassName } from "../ui/scroll-area";
 import {
+  flattenVisibleWorkEntryRows,
   liveWorkEntryLabel,
   resolveWorkGroupScrollIndex,
   shouldFollowWorkGroupAppend,
   workEntryIsVisibleInGroup,
+  type FlatWorkEntryRow,
   type MessagesTimelineRow,
 } from "./MessagesTimeline.logic";
 import { Popover, PopoverPopup, PopoverTrigger } from "../ui/popover";
@@ -30,7 +32,6 @@ import {
   TimelineRowCtx,
   TimelineRowActivityCtx,
   WorkGroupViewCtx,
-  type TimelineWorkEntry,
   type TimelineRow,
 } from "./timelineRowContext";
 import { TimelineRowTimestamp, ActivityShimmerOverlay } from "./TimelineRowParts";
@@ -84,17 +85,18 @@ export const WorkGroupSection = memo(function WorkGroupSection({
     );
   });
 
+  const entryRows = flattenVisibleWorkEntryRows(nonEmptyEntries);
   if (nonEmptyEntries.length === 0) return null;
   if (isExpandedToolGroup && nonEmptyEntries.every((entry) => entry.itemType === "reasoning")) {
     return <ReasoningTraceContent entries={nonEmptyEntries} />;
   }
-  if (isExpandedToolGroup) {
+  if (isExpandedToolGroup || entryRows.length > 1) {
     return (
       <ExpandedWorkGroupEntries
         key={`${routeThreadKey}:${anchorKey}`}
         anchorKey={anchorKey}
         disclosureAnchorKey={disclosureAnchorKey}
-        entries={nonEmptyEntries}
+        entries={entryRows}
         workspaceRoot={workspaceRoot}
       />
     );
@@ -102,17 +104,18 @@ export const WorkGroupSection = memo(function WorkGroupSection({
 
   return (
     <section aria-label="Activity">
-      {nonEmptyEntries.map((workEntry) => (
-        <SimpleWorkEntryRow
-          key={workEntry.id}
-          workEntry={workEntry}
-          workspaceRoot={workspaceRoot}
-          displayLabel={displayLabel}
-          onToggleEntry={(collapsed) =>
-            onToggleWorkEntry(disclosureAnchorKey, collapsed, workEntry.id)
-          }
-          onContentReady={() => onWorkEntryContentReady?.(disclosureAnchorKey, workEntry.id)}
-        />
+      {entryRows.map(({ id, entry: workEntry, depth }) => (
+        <WorkLogIndent key={id} depth={depth}>
+          <SimpleWorkEntryRow
+            workEntry={workEntry}
+            workspaceRoot={workspaceRoot}
+            displayLabel={depth === 0 ? displayLabel : undefined}
+            onToggleEntry={(collapsed) =>
+              onToggleWorkEntry(disclosureAnchorKey, collapsed, workEntry.id)
+            }
+            onContentReady={() => onWorkEntryContentReady?.(disclosureAnchorKey, workEntry.id)}
+          />
+        </WorkLogIndent>
       ))}
     </section>
   );
@@ -137,7 +140,7 @@ function ExpandedWorkGroupEntries({
 }: {
   anchorKey: string;
   disclosureAnchorKey: string;
-  entries: TimelineWorkEntry[];
+  entries: FlatWorkEntryRow[];
   workspaceRoot: string | undefined;
 }) {
   const {
@@ -224,8 +227,10 @@ function ExpandedWorkGroupEntries({
     return observeResize(content ? [element, content] : element, updateScrollFades);
   }, [updateScrollFades]);
 
-  const renderEntry = ({ item }: { item: TimelineWorkEntry }) => (
-    <SimpleWorkEntryRow key={item.id} workEntry={item} workspaceRoot={workspaceRoot} />
+  const renderEntry = ({ item }: { item: FlatWorkEntryRow }) => (
+    <WorkLogIndent key={item.id} depth={item.depth}>
+      <SimpleWorkEntryRow workEntry={item.entry} workspaceRoot={workspaceRoot} />
+    </WorkLogIndent>
   );
 
   const updateExpandedContentHeight = () => {
@@ -286,7 +291,7 @@ function ExpandedWorkGroupEntries({
   );
 }
 
-const workEntryKey = (entry: TimelineWorkEntry) => entry.id;
+const workEntryKey = (row: FlatWorkEntryRow) => row.id;
 
 export function WorkingTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "working" }> }) {
   const { isCompacting, isPreparingWorktree, backgroundWorktreeSetup } =

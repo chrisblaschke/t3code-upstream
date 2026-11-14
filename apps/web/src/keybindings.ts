@@ -189,6 +189,8 @@ export function resolveShortcutCommand(
   for (let index = keybindings.length - 1; index >= 0; index -= 1) {
     const binding = keybindings[index];
     if (!binding) continue;
+    // Escape cancels an IME composition, not the active provider turn.
+    if (binding.command === "thread.stop" && (event.isComposing || event.keyCode === 229)) continue;
     if (!matchesWhenClause(binding.whenAst, context)) continue;
     if (!matchesKeybindingShortcut(event, shortcutForContext(binding, context), platform)) continue;
     return binding.command;

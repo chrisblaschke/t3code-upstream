@@ -1,4 +1,8 @@
-import { OrchestratorMcpFailure } from "@t3tools/contracts";
+import { OrchestratorMcpFailure, type WorktreeMcpListResult } from "@t3tools/contracts";
+import * as FileSystem from "effect/FileSystem";
+import * as Path from "effect/Path";
+import * as Orchestrator from "../../../orchestration-v2/Orchestrator.ts";
+import { primaryWorktree, worktreeStatus } from "./inventory.ts";
 import * as Option from "effect/Option";
 import * as Project from "../../../project/ProjectService.ts";
 import { readThread, unavailable } from "../../threadAccess.ts";
@@ -18,25 +22,105 @@ const handlers = {
           code: "capability_denied",
           message: "This credential cannot inspect worktrees.",
         });
-      const { threadId, ...refs } = input;
       const {
-        projection: { thread },
-      } = yield* readThread(threadId);
+        threadId,
+        projectId,
+        includeStatus,
+        includeOwners,
+        environmentId: _,
+        ...refs
+      } = input;
+      if (threadId !== undefined && projectId !== undefined)
+        return yield* new OrchestratorMcpFailure({
+          code: "invalid_request",
+          message: "Pass either projectId or threadId, not both.",
+        });
+      const thread =
+        projectId === undefined ? (yield* readThread(threadId)).projection.thread : undefined;
       const projects = yield* Project.ProjectService;
-      const project = yield* projects.getById(thread.projectId).pipe(Effect.mapError(unavailable));
+      const project = yield* projects
+        .getById(projectId ?? thread!.projectId)
+        .pipe(Effect.mapError(unavailable));
       if (Option.isNone(project))
         return yield* new OrchestratorMcpFailure({
           code: "invalid_request",
           message: "The project was not found.",
         });
       const service = yield* WorktreeMcpService.WorktreeMcpService;
-      return yield* service
+      const listed = yield* service
         .listRefs({
           ...refs,
-          worktreePath: thread.worktreePath,
+          worktreePath: thread?.worktreePath ?? null,
           workspaceRoot: project.value.workspaceRoot,
         })
         .pipe(Effect.mapError(unavailable));
+      if (!listed.refs.some((ref) => ref.worktreePath !== null)) return listed;
+      const pathService = yield* Path.Path;
+      const fs = yield* FileSystem.FileSystem;
+      const cwd =
+        thread?.worktreePath &&
+        (yield* fs.exists(thread.worktreePath).pipe(Effect.mapError(unavailable)))
+          ? thread.worktreePath
+          : project.value.workspaceRoot;
+      const resolve = (path: string) => pathService.resolve(path);
+      // Git prints symlink-resolved paths (/private/var on macOS); T3 may record the link form.
+      const canonical = (path: string) =>
+        fs.realPath(path).pipe(Effect.orElseSucceed(() => resolve(path)));
+      const primaryPath = yield* primaryWorktree(cwd).pipe(Effect.mapError(unavailable));
+      const primary = primaryPath === null ? null : yield* canonical(primaryPath);
+      const shells = includeOwners
+        ? (yield* (yield* Orchestrator.OrchestratorV2)
+            .getShellSnapshot()
+            .pipe(Effect.mapError(unavailable))).threads
+        : [];
+      const paths = [
+        ...new Set(
+          listed.refs.flatMap((ref) =>
+            ref.worktreePath === null ? [] : [resolve(ref.worktreePath)],
+          ),
+        ),
+      ];
+      const inventory = new Map(
+        yield* Effect.forEach(
+          paths,
+          (path) =>
+            Effect.gen(function* () {
+              const real = yield* canonical(path);
+              const keys = new Set([path, real]);
+              return [
+                path,
+                {
+                  isMainWorktree: primary !== null && primary === real,
+                  ...(includeStatus ? { status: yield* worktreeStatus(path) } : {}),
+                  ...(includeOwners
+                    ? {
+                        owners: shells
+                          .filter(
+                            (owner) =>
+                              owner.deletedAt === null &&
+                              owner.worktreePath !== null &&
+                              keys.has(resolve(owner.worktreePath)),
+                          )
+                          .map((owner) => ({
+                            threadId: owner.id,
+                            projectId: owner.projectId,
+                            settled: owner.settledOverride === "settled",
+                            archived: owner.archivedAt !== null,
+                          })),
+                      }
+                    : {}),
+                },
+              ] as const;
+            }),
+          { concurrency: 4 },
+        ),
+      );
+      return {
+        ...listed,
+        refs: listed.refs.map((ref) =>
+          ref.worktreePath === null ? ref : { ...ref, ...inventory.get(resolve(ref.worktreePath)) },
+        ),
+      } satisfies WorktreeMcpListResult;
     }),
   ),
   t3_worktree_handoff: McpToolAccess.actsAsCaller((input) =>

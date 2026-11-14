@@ -4,6 +4,7 @@ import {
   injectHtmlRenderBootstrap,
   readHtmlRenderImageRequest,
   readHtmlRenderLinkRequest,
+  readHtmlRenderMessage,
 } from "./htmlRender.ts";
 import { htmlRenderFromToolItem } from "./toolOutput.ts";
 
@@ -60,6 +61,32 @@ describe("injectHtmlRenderBootstrap", () => {
       injected.indexOf("<html><head>"),
     );
     expect(injected).toContain('<meta name="viewport" content="width=device-width');
+  });
+});
+
+describe("readHtmlRenderMessage", () => {
+  it("reads user text from an MCP Apps ui/message and rejects anything else", () => {
+    const message = (params: unknown) => ({
+      jsonrpc: "2.0",
+      id: "a",
+      method: "ui/message",
+      params,
+    });
+    const text = (value: string) => ({ type: "text", text: value });
+    expect(
+      readHtmlRenderMessage(message({ role: "user", content: [text("1. A"), text("2. B")] })),
+    ).toEqual({
+      id: "a",
+      text: "1. A\n2. B",
+    });
+    expect(readHtmlRenderMessage(message({ role: "user", content: text("hi") }))?.text).toBe("hi");
+    expect(
+      readHtmlRenderMessage(message({ role: "assistant", content: [text("hi")] })),
+    ).toBeUndefined();
+    expect(
+      readHtmlRenderMessage(message({ role: "user", content: [text("hi"), { type: "image" }] })),
+    ).toBeUndefined();
+    expect(readHtmlRenderMessage(message({ role: "user", content: [text("  ")] }))).toBeUndefined();
   });
 });
 

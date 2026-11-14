@@ -673,6 +673,48 @@ export const layerWithOptions = (
           lastError:
             input.reason === "runtime_error" ? (input.detail ?? "Provider runtime failed.") : null,
         };
+        // Adapter finalizers emit after removal from the live map, so the
+        // event pump cannot persist their cleanup. Clear durable UI here.
+        for (const threadId of input.entry.attachedThreadIds) {
+          const appThread = yield* projectionStore.getThread(threadId);
+          const { providerThreads } = yield* projectionStore.getThreadRecords(threadId, [
+            "providerThreads",
+          ]);
+          for (const thread of providerThreads) {
+            if (
+              // provider-thread.updated also selects the active thread. Only
+              // clear visible metadata; never reselect a superseded session.
+              thread.id !== appThread.activeProviderThreadId ||
+              thread.providerSessionId !== input.entry.runtime.providerSessionId ||
+              !Array.isArray(thread.nativeMetadata?.statusLines) ||
+              thread.nativeMetadata.statusLines.length === 0
+            )
+              continue;
+            const event: OrchestrationV2DomainEvent = {
+              id: yield* idAllocator.allocate.event({
+                threadId,
+                providerSessionId: input.entry.runtime.providerSessionId,
+              }),
+              type: "provider-thread.updated",
+              threadId,
+              driver: input.entry.runtime.driver,
+              providerInstanceId: input.entry.runtime.instanceId,
+              occurredAt: now,
+              payload: {
+                ...thread,
+                updatedAt: now,
+                nativeMetadata: { ...thread.nativeMetadata, statusLines: [] },
+              },
+            };
+            // Selection and metadata may both change after the reads above.
+            // Losing this CAS is fine: newer state owns the visible statuses.
+            yield* eventSink.writeIfProviderThreadUnchanged({
+              expected: thread,
+              requireActive: true,
+              events: [event],
+            });
+          }
+        }
         yield* writeProviderSessionEvents({
           runtime: input.entry.runtime,
           threadIds: input.entry.attachedThreadIds,
@@ -833,7 +875,10 @@ export const layerWithOptions = (
               "providerThreads",
             ]);
             for (const providerThread of projection.providerThreads) {
-              const tasks = providerThread.pendingBackgroundTasks ?? [];
+              const tasks = [
+                ...(providerThread.pendingBackgroundTasks ?? []),
+                ...(providerThread.pendingBackgroundTaskWakes ?? []),
+              ];
               if (providerThread.providerSessionId !== providerSessionId || tasks.length === 0) {
                 continue;
               }
@@ -878,7 +923,14 @@ export const layerWithOptions = (
                 );
                 const tasks = providerThread?.pendingBackgroundTasks ?? [];
                 const remaining = tasks.filter((task) => !taskIds.has(task.taskId));
-                if (providerThread === undefined || remaining.length === tasks.length) return;
+                const pendingWakes = providerThread?.pendingBackgroundTaskWakes ?? [];
+                const remainingWakes = pendingWakes.filter((task) => !taskIds.has(task.taskId));
+                if (
+                  providerThread === undefined ||
+                  (remaining.length === tasks.length &&
+                    remainingWakes.length === pendingWakes.length)
+                )
+                  return;
                 const now = yield* DateTime.now;
                 const { committed } = yield* eventSink.writeIfProviderThreadUnchanged({
                   expected: providerThread,
@@ -893,6 +945,7 @@ export const layerWithOptions = (
                       payload: {
                         ...providerThread,
                         pendingBackgroundTasks: remaining,
+                        pendingBackgroundTaskWakes: remainingWakes,
                         updatedAt: now,
                       },
                     },
@@ -1902,8 +1955,50 @@ export const layerWithOptions = (
           ),
         );
 
+      // Callers hold a provider batch transaction from this check through ingestion:
+      // an idle snapshot must not reselect a conversation replaced by a handoff.
+      const mergeIdleThreadUpdate = Effect.fn("ProviderSessionManager.mergeIdleThreadUpdate")(
+        function* (
+          threadId: ThreadId,
+          providerSessionId: ProviderSessionId,
+          providerThread: OrchestrationV2ProviderThread,
+        ) {
+          if (providerThread.providerSessionId !== providerSessionId) return null;
+          const thread = yield* projectionStore.getThread(threadId);
+          if (thread.activeProviderThreadId === null) return providerThread;
+          if (thread.activeProviderThreadId !== providerThread.id) return null;
+          const { providerThreads } = yield* projectionStore.getThreadRecords(threadId, [
+            "providerThreads",
+          ]);
+          const current = providerThreads.find((candidate) => candidate.id === providerThread.id);
+          if (current === undefined) return providerThread;
+          if (current.providerSessionId !== providerSessionId) return null;
+          // The file follower can advance history while the attached runtime is
+          // idle. Runtime UI snapshots do not own that synchronized cursor.
+          return {
+            ...providerThread,
+            nativeConversationHeadRef: current.nativeConversationHeadRef,
+            firstRunOrdinal: current.firstRunOrdinal,
+            lastRunOrdinal: current.lastRunOrdinal,
+          };
+        },
+        (effect, _threadId, providerSessionId, providerThread) =>
+          effect.pipe(
+            Effect.mapError(
+              (cause) =>
+                new ProviderAdapter.ProviderAdapterEventStreamError({
+                  driver: providerThread.driver,
+                  providerSessionId,
+                  cause,
+                }),
+            ),
+          ),
+      );
+
       const makeEventSubscription = Effect.fn("ProviderSessionManager.makeEventSubscription")(
         function* (
+          runtime: ProviderAdapter.ProviderAdapterV2SessionRuntime,
+          requestEventPermit: Semaphore.Semaphore,
           subscribers: Ref.Ref<
             ReadonlyMap<number, Queue.Queue<ProviderSessionEventSignal, Cause.Done>>
           >,
@@ -1925,11 +2020,57 @@ export const layerWithOptions = (
           }).pipe(
             Effect.flatMap((removed) =>
               removed
-                ? Queue.clear(queue).pipe(Effect.andThen(Queue.end(queue)), Effect.asVoid)
+                ? Effect.gen(function* () {
+                    const buffered = yield* Queue.clear(queue);
+                    yield* Queue.end(queue);
+                    if ((yield* Ref.get(subscribers)).size > 0) return;
+                    // The consumer may stop at terminal before the pump's next
+                    // metadata update is consumed. Preserve only those queued
+                    // updates once the last consumer has actually stopped.
+                    for (const signal of buffered) {
+                      if (
+                        signal.type !== "event" ||
+                        signal.event.type !== "provider_thread.updated"
+                      )
+                        continue;
+                      const threadId = signal.event.providerThread.appThreadId;
+                      const current = (yield* Ref.get(sessions)).get(
+                        sessionKey(runtime.providerSessionId),
+                      );
+                      if (
+                        threadId === null ||
+                        signal.event.providerThread.ownerNodeId !== null ||
+                        current?.runtime !== runtime ||
+                        !current.attachedThreadIds.has(threadId)
+                      )
+                        continue;
+                      const providerThread = yield* mergeIdleThreadUpdate(
+                        threadId,
+                        runtime.providerSessionId,
+                        signal.event.providerThread,
+                      );
+                      if (providerThread === null) continue;
+                      yield* providerEventIngestor.ingestNormalized({
+                        providerSessionId: runtime.providerSessionId,
+                        providerInstanceId: runtime.instanceId,
+                        threadId,
+                        event: { ...signal.event, providerThread },
+                      });
+                    }
+                  }).pipe(eventSink.withProviderBatch)
                 : Effect.void,
             ),
+            requestEventPermit.withPermits(1),
+            Effect.catchCause((cause) =>
+              Effect.logWarning("orchestration-v2.driver-session.subscription-close-failed", {
+                providerSessionId: runtime.providerSessionId,
+                cause,
+              }),
+            ),
           );
-          const events = Stream.fromQueue(queue).pipe(
+          // Pull one signal at a time so early stream termination leaves late
+          // metadata in the queue for close, rather than in a discarded chunk.
+          const events = Stream.fromEffectRepeat(Queue.take(queue)).pipe(
             Stream.mapEffect((signal) =>
               signal.type === "event"
                 ? Effect.succeed(signal.event)
@@ -1943,12 +2084,19 @@ export const layerWithOptions = (
 
       const decorateRuntime = (
         runtime: ProviderAdapter.ProviderAdapterV2SessionRuntime,
+        requestEventPermit: Semaphore.Semaphore,
         eventSubscribers: Ref.Ref<
           ReadonlyMap<number, Queue.Queue<ProviderSessionEventSignal, Cause.Done>>
         >,
       ): ProviderAdapter.ProviderAdapterV2SessionRuntime => {
         const providerSessionId = runtime.providerSessionId;
-        const subscribeEvents = makeEventSubscription(eventSubscribers);
+        const subscribeEvents = makeEventSubscription(
+          runtime,
+          requestEventPermit,
+          eventSubscribers,
+        );
+        // Every provider's turn operations pass through here, so this is where they are
+        // counted. Only turn starts are timed: until the provider accepts the turn.
         const turnMetrics = (operation: string, model?: string) =>
           withMetrics({
             counter: providerTurnsTotal,
@@ -2471,8 +2619,26 @@ export const layerWithOptions = (
                       });
                     });
                   }
-                  // Requests and recovered background commands can arrive before a run subscribes.
-                  const threadId = sessionScopedArtifactThreadId(event);
+                  // Session-scoped artifacts bypass run subscriptions. Ordinary idle snapshots
+                  // still persist after the last subscriber has stopped.
+                  const artifactThreadId = sessionScopedArtifactThreadId(event);
+                  // Active runs own ordinary snapshots, including native children that
+                  // are not attached to this runtime as independent T3 threads.
+                  if (
+                    artifactThreadId === undefined &&
+                    event.type === "provider_thread.updated" &&
+                    (yield* Ref.get(entry.eventSubscribers)).size > 0
+                  ) {
+                    yield* publishToSubscribers(entry.eventSubscribers, { type: "event", event });
+                    yield* releaseLiveOutput;
+                    return;
+                  }
+                  const idleUpdateThreadId =
+                    event.type === "provider_thread.updated" &&
+                    event.providerThread.ownerNodeId === null
+                      ? (event.providerThread.appThreadId ?? undefined)
+                      : undefined;
+                  const threadId = artifactThreadId ?? idleUpdateThreadId;
                   if (threadId !== undefined) {
                     yield* Effect.gen(function* () {
                       const current = (yield* Ref.get(sessions)).get(
@@ -2486,24 +2652,34 @@ export const layerWithOptions = (
                           !current.attachedThreadIds.has(threadId))
                       )
                         return;
-                      yield* providerEventIngestor
-                        .ingestNormalized({
-                          providerSessionId: entry.runtime.providerSessionId,
-                          providerInstanceId: entry.runtime.instanceId,
+                      let normalizedEvent = event;
+                      if (event.type === "provider_thread.updated") {
+                        const providerThread = yield* mergeIdleThreadUpdate(
                           threadId,
-                          event,
-                        })
-                        .pipe(
-                          Effect.mapError(
-                            (cause) =>
-                              new ProviderAdapter.ProviderAdapterEventStreamError({
-                                driver: entry.runtime.driver,
-                                providerSessionId: entry.runtime.providerSessionId,
-                                cause,
-                              }),
-                          ),
+                          entry.runtime.providerSessionId,
+                          event.providerThread,
                         );
-                    }).pipe(entry.requestEventPermit.withPermits(1));
+                        if (providerThread === null) return;
+                        normalizedEvent = { ...event, providerThread };
+                      }
+                      yield* providerEventIngestor.ingestNormalized({
+                        providerSessionId: entry.runtime.providerSessionId,
+                        providerInstanceId: entry.runtime.instanceId,
+                        threadId,
+                        event: normalizedEvent,
+                      });
+                    }).pipe(
+                      eventSink.withProviderBatch,
+                      Effect.mapError(
+                        (cause) =>
+                          new ProviderAdapter.ProviderAdapterEventStreamError({
+                            driver: entry.runtime.driver,
+                            providerSessionId: entry.runtime.providerSessionId,
+                            cause,
+                          }),
+                      ),
+                      entry.requestEventPermit.withPermits(1),
+                    );
                     yield* releaseLiveOutput;
                     return;
                   }
@@ -2712,7 +2888,8 @@ export const layerWithOptions = (
               const eventSubscribers = yield* Ref.make<
                 ReadonlyMap<number, Queue.Queue<ProviderSessionEventSignal, Cause.Done>>
               >(new Map());
-              const exposedRuntime = decorateRuntime(runtime, eventSubscribers);
+              const requestEventPermit = yield* Semaphore.make(1);
+              const exposedRuntime = decorateRuntime(runtime, requestEventPermit, eventSubscribers);
               const entry: LiveSessionEntry = {
                 attachedThreadIds: new Set([input.threadId]),
                 loadedProviderThreadKeyByThread: new Map(),
@@ -2728,7 +2905,7 @@ export const layerWithOptions = (
                 runtime,
                 exposedRuntime,
                 eventSubscribers,
-                requestEventPermit: yield* Semaphore.make(1),
+                requestEventPermit,
                 scope: sessionScope,
                 idleGeneration: 0,
                 busyTurns: new Set(),

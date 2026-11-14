@@ -56,6 +56,8 @@ interface ChatHeaderProps {
   onNewThreadInProject: () => void;
   onOpenProjectSettings?: (() => void) | undefined;
   onFindInThread?: ((threadRef: ScopedThreadRef) => void) | undefined;
+  /** Present for Pi threads with a session file: opens the Pi TUI on it. */
+  onOpenPiTerminal?: (() => void) | undefined;
 }
 
 function resolveRenameCommit(input: {
@@ -81,6 +83,7 @@ export const ChatHeader = memo(function ChatHeader({
   onNewThreadInProject,
   onOpenProjectSettings,
   onFindInThread,
+  onOpenPiTerminal,
 }: ChatHeaderProps) {
   const activeProjectName = activeProject?.isScratch ? "No project" : activeProject?.title;
   const activeProjectCwd = activeProject?.workspaceRoot ?? null;
@@ -201,6 +204,7 @@ export const ChatHeader = memo(function ChatHeader({
     projectCwd: activeProjectCwd,
     onStartRename: startRename,
     onFind: onFindInThread,
+    ...(onOpenPiTerminal ? { onOpenPiTerminal } : {}),
     canShareWithGuest,
   });
   const openMenuFromTitle = (event: ReactMouseEvent<HTMLButtonElement>) => {

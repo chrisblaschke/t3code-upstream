@@ -15,7 +15,9 @@ import {
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import * as Schema from "effect/Schema";
-import { describe, expect, it, vi } from "vite-plus/test";
+import { describe, expect, it, onTestFinished, vi } from "vite-plus/test";
+import { DEFAULT_CLIENT_SETTINGS } from "@t3tools/contracts/settings";
+import { __setClientSettingsForTests } from "../../hooks/useSettings";
 import { userEvent } from "vite-plus/test/browser";
 
 import "~/index.css";
@@ -217,6 +219,8 @@ function visit(path: string): Disposable {
 
 describe("GuestPage", () => {
   it("shows the shared thread in the real timeline without opening an environment connection", async () => {
+    __setClientSettingsForTests({ ...DEFAULT_CLIENT_SETTINGS, transcriptMode: "compact" });
+    onTestFinished(() => __setClientSettingsForTests(DEFAULT_CLIENT_SETTINGS));
     using _page = visit(`/guest?share=${SHARE_ID}`);
     using _session = vi
       .spyOn(window, "fetch")

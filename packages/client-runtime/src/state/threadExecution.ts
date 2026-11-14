@@ -189,12 +189,17 @@ export function deriveProviderSubagentStatus(
 }
 
 export function deriveReportedModelSelection(projection: ThreadStructure): ModelSelection | null {
+  return deriveActiveProviderThreadNativeMetadata(projection)?.modelSelection ?? null;
+}
+
+/** Session UI belongs only to the active provider thread, not a previous handoff. */
+export function deriveActiveProviderThreadNativeMetadata(projection: ThreadStructure) {
   const providerThread = projection.providerThreads.find(
     (candidate) =>
       candidate.id === projection.thread.activeProviderThreadId &&
       candidate.providerInstanceId === projection.thread.modelSelection.instanceId,
   );
-  return providerThread?.nativeMetadata?.modelSelection ?? null;
+  return providerThread?.nativeMetadata ?? null;
 }
 
 export const REASONING_EFFORT_OPTION_IDS: ReadonlyArray<string> = [
@@ -204,6 +209,7 @@ export const REASONING_EFFORT_OPTION_IDS: ReadonlyArray<string> = [
   "variant",
   "reasoning_effort",
   "thinking_level",
+  "thinking",
 ];
 
 export function formatModelSelectionEffort(

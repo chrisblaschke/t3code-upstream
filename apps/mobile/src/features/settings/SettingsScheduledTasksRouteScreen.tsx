@@ -776,16 +776,27 @@ function TaskForm({
       threadId: draft.threadId,
       ...(offersThreadModes ? { threadMode: draft.threadMode } : {}),
       workspaceStrategy:
-        draft.workspace === "root"
-          ? { type: "root" }
-          : draft.workspace === "existing_worktree"
-            ? { type: "existing_worktree", worktreePath: draft.checkoutPath.trim() }
-            : {
-                type: "worktree",
-                baseRef: draft.baseRef.trim() || "main",
-                startFromOrigin: draft.startFromOrigin,
-              },
-      // Tasks have no mode picker; a mode above the administrator's ceiling is refused.
+        draft.workspace === "rift"
+          ? {
+              type: "rift",
+              ...(draft.task?.workspaceStrategy.branch
+                ? { branch: draft.task.workspaceStrategy.branch }
+                : {}),
+            }
+          : draft.workspace === "root"
+            ? { type: "root" }
+            : draft.workspace === "existing_worktree"
+              ? { type: "existing_worktree", worktreePath: draft.checkoutPath.trim() }
+              : {
+                  type: "worktree",
+                  ...(draft.task?.workspaceStrategy.type === "worktree" &&
+                  draft.task.workspaceStrategy.branch
+                    ? { branch: draft.task.workspaceStrategy.branch }
+                    : {}),
+                  baseRef: draft.baseRef.trim() || "main",
+                  startFromOrigin: draft.startFromOrigin,
+                },
+      // Tasks have no mode picker; enforce the administrator ceiling.
       runtimeMode:
         clampManagedRuntimeMode(config?.managedPolicy, draft.runtimeMode) ?? draft.runtimeMode,
       interactionMode: draft.task?.interactionMode ?? "default",
@@ -963,13 +974,20 @@ function TaskForm({
           <SelectRow
             label="Run in"
             value={
-              draft.workspace === "worktree"
-                ? "New worktree"
-                : draft.workspace === "root"
-                  ? "Project checkout"
-                  : "Specific checkout"
+              draft.workspace === "rift"
+                ? "Copy (rift)"
+                : draft.workspace === "worktree"
+                  ? "New worktree"
+                  : draft.workspace === "root"
+                    ? "Project checkout"
+                    : "Specific checkout"
             }
             actions={[
+              {
+                id: "rift",
+                title: "Copy (rift)",
+                state: draft.workspace === "rift" ? "on" : undefined,
+              },
               {
                 id: "worktree",
                 title: "New worktree",
@@ -987,7 +1005,7 @@ function TaskForm({
               },
             ]}
             onSelect={(id) => {
-              if (id === "worktree" || id === "root" || id === "existing_worktree")
+              if (id === "rift" || id === "worktree" || id === "root" || id === "existing_worktree")
                 setDraft({ ...draft, workspace: id });
             }}
           />

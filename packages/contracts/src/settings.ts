@@ -390,7 +390,15 @@ export const VoiceTranscriptionDestination = Schema.Union([
 ]);
 export type VoiceTranscriptionDestination = typeof VoiceTranscriptionDestination.Type;
 
+/** Compact groups finished turns; terminal shows each step and its output inline. */
+export const TranscriptMode = Schema.Literals(["compact", "terminal"]);
+export type TranscriptMode = typeof TranscriptMode.Type;
+export const DEFAULT_TRANSCRIPT_MODE: TranscriptMode = "terminal";
+
 export const ClientSettingsSchema = Schema.Struct({
+  transcriptMode: TranscriptMode.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_TRANSCRIPT_MODE)),
+  ),
   notificationMode: NotificationMode.pipe(
     Schema.withDecodingDefault(Effect.succeed("off" as const)),
   ),
@@ -1981,6 +1989,7 @@ export function requiredScopesForProjectMutation(
 }
 
 export const ClientSettingsPatch = Schema.Struct({
+  transcriptMode: Schema.optionalKey(TranscriptMode),
   notificationMode: Schema.optionalKey(NotificationMode),
   inAppNotificationsEnabled: Schema.optionalKey(Schema.Boolean),
   diffColorScheme: Schema.optionalKey(DiffColorScheme),

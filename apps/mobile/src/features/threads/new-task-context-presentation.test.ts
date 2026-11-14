@@ -9,6 +9,12 @@ import {
 } from "./new-task-context-presentation";
 
 describe("resolveNewTaskWorkspaceSelection", () => {
+  it("preserves the Rift mode for a git project", () => {
+    const selection = { mode: "rift", branch: "main", worktreePath: null } as const;
+    expect(
+      resolveNewTaskWorkspaceSelection({ selection, fallback: selection, isGitRepo: true }),
+    ).toBe(selection);
+  });
   const fallback = { mode: "worktree", branch: null, worktreePath: null } as const;
 
   it("falls back to the current checkout when a non-git project defaults to worktree", () => {
@@ -17,7 +23,7 @@ describe("resolveNewTaskWorkspaceSelection", () => {
     ).toEqual({ mode: "local", branch: null, worktreePath: null });
   });
 
-  it.each(["local", "worktree"] as const)(
+  it.each(["local", "worktree", "rift"] as const)(
     "clears stale %s selections for non-git projects",
     (mode) => {
       expect(

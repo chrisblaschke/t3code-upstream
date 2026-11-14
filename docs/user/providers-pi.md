@@ -3,6 +3,14 @@
 T3 Code can use your existing Pi coding agent installation while keeping Pi's models, auth,
 extensions, skills, context files, and native session history.
 
+## This fork
+
+Upgrading T3 does not upgrade the installed Pi version. Branch, base, and check results
+belong in the rebase notes rather than this setup guide.
+Managed installations live under `~/.pi/agent/install/releases`, with the launcher
+at `~/.pi/agent/bin/pi`. Fleet installation and rollback instructions are in the
+managed `fleet` skill; do not replace those installations with a global npm install.
+
 ## Set Up Pi
 
 1. Install [Pi](https://pi.dev) on the machine running the T3 Code server. Pi requires Node.js
@@ -43,17 +51,27 @@ a speed picker with Standard plus those tiers. A chosen tier is sent as the requ
 `service_tier`; Standard sends none and leaves the endpoint's default. Threads
 use Pi's native session files for resume, rollback, and forks within the same Pi instance. Forks
 preserve the native conversation through the selected turn in the destination workspace.
+Project import also picks up sessions you ran with the Pi CLI in that directory: each becomes a
+thread bound to the same session file, so continuing it in T3 Code resumes the CLI conversation.
+Sessions T3 Code started itself are not imported again.
 Switching providers uses portable conversation context. Extension
 dialogs appear in the T3 Code composer, and the thread details context window follows Pi's own usage
-reporting while a response streams and after it settles.
+reporting while a response streams and after it settles. The usage card shows only Pi's
+quota for the selected model's vendor, never Codex CLI or Claude Code quotas.
+
+Side chats use Pi's session-fork path. They fork the saved transcript into a new session,
+not a running turn. They keep the parent's workspace, including a Rift workspace;
+remote threads fork on their own server. Side chats do not replace delegated tasks.
 
 Pi skills appear in the composer's `$` menu. This includes user skills and project skills that Pi
 loads for the current workspace; selecting one uses Pi's native skill expansion.
 
 Pi loads its normal user extensions, and project extensions once the folder is trusted in Pi.
 Blocking `select`, `confirm`, `input`, and `editor` dialogs work in T3 Code. Notifications appear in
-the work log. Extensions can publish status text near the composer. Terminal titles and generic
-widgets do not have a T3 Code equivalent.
+the work log, and extensions can publish status text near the composer. Nested tools appear under
+their parent call. This fork also offers a terminal transcript mode. "Open in Pi terminal" resumes
+the native session in the embedded terminal or configured external terminal. Generic widgets do not
+have a T3 Code equivalent.
 
 ## Permission Modes
 
@@ -71,7 +89,11 @@ Changing the mode restarts the Pi provider session and resumes the same native c
 policy covers Pi tool calls; it is not an operating-system sandbox, and code that a trusted Pi
 extension runs outside a tool call remains governed by Pi's own extension trust model.
 
-T3 Code's `delegate_task` tool creates durable child threads in the shared subagent UI. If the user
+T3 Code's `delegate_task` tool creates durable child threads in the shared subagent UI.
+In this fork it can also run on linked fleet machines with `target.environmentId`
+and the destination's `projectId`. A remote task returns `remoteChild`; its completion
+and questions wake the parent. See [the MCP reference](../orchestration-v2/orchestrator-mcp-server.md)
+for routing, permissions, isolation and thread lookup. If the user
 installs Pi's example `subagent` extension, T3 Code also shows its task progress and results in that
 UI. Pi runs those children without a session, so they cannot be opened or resumed as T3 Code
 threads.

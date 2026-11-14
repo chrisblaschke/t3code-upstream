@@ -15,6 +15,7 @@ import {
   AuthPreviewOperateScope,
   AuthProvidersManageScope,
   AuthSettingsWriteScope,
+  AuthTerminalOperateScope,
   AuthSourceControlWriteScope,
   ThreadId,
   EnvironmentId,
@@ -128,6 +129,28 @@ describe("command permissions", () => {
         expect((yield* close.authorize(registry, other).pipe(Effect.flip))._tag).toBe(
           "EnvironmentAuthorizationError",
         );
+      }),
+    ),
+  );
+
+  it.effect.each([
+    { method: WS_METHODS.shellOpenExternalTerminal, scope: AuthTerminalOperateScope },
+  ] as const)("checks fork RPC $method before execution", ({ method, scope }) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const registry = yield* setup;
+        const permission = createCommandPermissions(runtime, method);
+        registry.set(sessions(env), AsyncResult.success(grant(false)));
+        expect(registry.get(permission.permissionAtom(env))).toBe(false);
+        expect(
+          (yield* permission.authorize(registry, env).pipe(Effect.flip)).requiredPermission,
+        ).toBe(scope);
+        registry.set(
+          sessions(env),
+          AsyncResult.success({ ...grant(false), scopes: [scope], permissions: [scope] }),
+        );
+        expect(registry.get(permission.permissionAtom(env))).toBe(true);
+        yield* permission.authorize(registry, env);
       }),
     ),
   );

@@ -253,8 +253,9 @@ export function HtmlRenderTimelineRow({
   row: Extract<TimelineRow, { kind: "html-render" }>;
 }) {
   const ctx = use(TimelineRowCtx);
-  const { onAppFullscreenChange } = ctx;
+  const { onAppFullscreenChange, onAppReaderResize } = ctx;
   const onFullscreenChange = (fullscreen: boolean) => onAppFullscreenChange(row.id, fullscreen);
+  const onReaderResize = () => onAppReaderResize(row.id);
 
   if (ctx.renderHtmlRender) {
     return <div className="min-w-0 px-1">{ctx.renderHtmlRender(row)}</div>;
@@ -267,6 +268,8 @@ export function HtmlRenderTimelineRow({
         htmlRender={row.htmlRender}
         threadRef={ctx.threadRef ?? undefined}
         onFullscreenChange={onFullscreenChange}
+        onReaderResize={onReaderResize}
+        onSendMessage={ctx.onSendAppMessage}
       />
     </div>
   );

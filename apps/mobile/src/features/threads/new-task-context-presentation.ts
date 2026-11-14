@@ -1,9 +1,8 @@
 import { sanitizeNewRefName } from "@t3tools/shared/git";
 import { sourceControlClients } from "@t3tools/client-runtime/source-control-clients";
-import { resolveSendEnvMode } from "@t3tools/shared/projectSettings";
 import type { ComposerDraftWorkspaceSelection } from "../../state/use-composer-drafts";
 
-type WorkspaceMode = "local" | "worktree";
+type WorkspaceMode = "local" | "worktree" | "rift";
 
 export function resolveNewTaskWorkspaceSelection(input: {
   readonly selection: ComposerDraftWorkspaceSelection | undefined;
@@ -11,14 +10,14 @@ export function resolveNewTaskWorkspaceSelection(input: {
   readonly isGitRepo: boolean;
 }): ComposerDraftWorkspaceSelection {
   const selection = input.selection ?? input.fallback;
-  const mode = resolveSendEnvMode({ requestedEnvMode: selection.mode, isGitRepo: input.isGitRepo });
-  return input.isGitRepo ? selection : { mode, branch: null, worktreePath: null };
+  return input.isGitRepo ? selection : { mode: "local", branch: null, worktreePath: null };
 }
 
 export function resolveNewTaskWorkspaceLabel(input: {
   readonly workspaceMode: WorkspaceMode;
   readonly worktreePath: string | null;
-}): "Current checkout" | "Current worktree" | "New worktree" {
+}): "Current checkout" | "Current worktree" | "New worktree" | "Copy (rift)" {
+  if (input.workspaceMode === "rift") return "Copy (rift)";
   if (input.workspaceMode === "worktree") {
     return "New worktree";
   }
@@ -31,7 +30,7 @@ export function resolveNewTaskBranchWorktreePath(input: {
   readonly branchWorktreePath: string | null | undefined;
 }): string | null {
   if (
-    input.workspaceMode === "worktree" ||
+    input.workspaceMode !== "local" ||
     !input.branchWorktreePath ||
     input.branchWorktreePath === input.projectCwd
   ) {
@@ -132,6 +131,10 @@ export function fillNewTaskWorkspaceBranch(input: {
 }): ComposerDraftWorkspaceSelection {
   const { selection } = input;
   if (selection.branch !== null) return selection;
+  if (selection.mode === "rift") {
+    const current = input.branches.find((branch) => !branch.isRemote && branch.current);
+    return current ? { ...selection, branch: current.name, worktreePath: null } : selection;
+  }
   if (selection.mode === "worktree") {
     // The default may only exist as origin/<default>, so search remote refs too.
     const base =

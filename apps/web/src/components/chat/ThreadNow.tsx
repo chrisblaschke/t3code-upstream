@@ -85,12 +85,14 @@ export function ThreadNow({
   work,
   syncPhase,
   goal,
+  providerStatusLines = [],
 }: {
   /** Something that needs you elsewhere, such as a subagent's question. */
   readonly attention: ThreadNowItem | null;
   readonly work: ThreadNowItem | null;
   readonly syncPhase: ThreadSyncPhase | null;
   readonly goal: ThreadNowItem | null;
+  readonly providerStatusLines?: ReadonlyArray<{ readonly key: string; readonly text: string }>;
 }): ReactNode {
   return (
     <>
@@ -98,6 +100,16 @@ export function ThreadNow({
       {work ? <ThreadNowLine item={work} /> : null}
       {syncPhase ? <ThreadSyncLine phase={syncPhase} /> : null}
       {goal ? <ThreadNowLine item={goal} /> : null}
+      {providerStatusLines.map(({ key, text }) => (
+        <ThreadNowLine
+          key={key}
+          item={{
+            id: `provider-status:${key}`,
+            icon: null,
+            title: <span className="whitespace-pre-wrap">{text}</span>,
+          }}
+        />
+      ))}
     </>
   );
 }

@@ -8,9 +8,29 @@ export const T3_MCP_BEARER_ENV = "T3_MCP_BEARER_TOKEN";
 export const T3_PI_RUNTIME_MODE_ENV = "T3_PI_RUNTIME_MODE";
 export const T3_PI_MCP_EXTENSION_PATH_ENV = "T3_PI_MCP_EXTENSION_PATH";
 export const PI_T3_SERVICE_TIER_COMMAND = "t3-service-tier";
+export const T3_PI_ROLLBACK_NONCE_ENV = "T3_PI_ROLLBACK_NONCE";
+export const PI_T3_FORK_BEFORE_BASH_COMMAND = "t3-internal:fork-before-bash";
 
 // These tools trigger file-change approvals, bypassed by Auto-accept edits.
 export const PI_FILE_CHANGE_TOOLS = ["edit", "write"] as const;
+
+const PI_T3_DIRECT_TOOLS = [
+  "orchestrator_capabilities",
+  "delegate_task",
+  "task_status",
+  "t3_thread_list",
+  "t3_thread_read",
+  "t3_thread_search",
+  "html_preview",
+  "html_render",
+] as const;
+
+// Keep shared policy upstream-owned; only discovery differs for the Pi bridge.
+export const PI_T3_DEFERRED_NOTE = `Pi T3 tools are named \`mcp__t3-code__<name>\`. Direct tools: ${PI_T3_DIRECT_TOOLS.map((name) => `\`${name}\``).join(", ")}. Load other T3 tools with \`tool_search\` before calling them.`;
+const PI_T3_INSTRUCTIONS = T3_CODE_ORCHESTRATION_INSTRUCTIONS.trim().replace(
+  "T3 tools may load late. Try the name once before you call it absent.",
+  PI_T3_DEFERRED_NOTE,
+);
 
 export const PI_T3_MCP_EXTENSION_SOURCE = `\
 import { stripFrontmatter, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -22,7 +42,7 @@ const URL_ENV = ${JSON.stringify(T3_MCP_URL_ENV)};
 const TOKEN_ENV = ${JSON.stringify(T3_MCP_BEARER_ENV)};
 const RUNTIME_MODE_ENV = ${JSON.stringify(T3_PI_RUNTIME_MODE_ENV)};
 const EXTENSION_PATH_ENV = ${JSON.stringify(T3_PI_MCP_EXTENSION_PATH_ENV)};
-const ORCHESTRATION_INSTRUCTIONS = ${JSON.stringify(T3_CODE_ORCHESTRATION_INSTRUCTIONS.trim())};
+const ORCHESTRATION_INSTRUCTIONS = ${JSON.stringify(PI_T3_INSTRUCTIONS)};
 const SERVICE_TIER_COMMAND = ${JSON.stringify(PI_T3_SERVICE_TIER_COMMAND)};
 const PROTOCOL = "2025-06-18";
 const READ_ONLY_TOOLS = new Set(["read", "grep", "find", "ls"]);
@@ -257,6 +277,23 @@ export default async function t3McpExtension(pi: ExtensionAPI) {
     );
   });
 
+  // RPC fork-before accepts only user messages. Native commands can fork at
+  // a bash entry's parent, or start a new session when the bash entry is root.
+  pi.registerCommand(${JSON.stringify(PI_T3_FORK_BEFORE_BASH_COMMAND)}, {
+    handler: async (args, ctx) => {
+      const [nonce, entryId, extra] = args.trim().split(/\\s+/);
+      const expected = env(${JSON.stringify(T3_PI_ROLLBACK_NONCE_ENV)});
+      // No-op if typed by hand or run outside the owning adapter process.
+      if (!expected || nonce !== expected || !entryId || extra) return;
+      const entry = ctx.sessionManager.getEntry(entryId);
+      if (entry?.type !== "message" || entry.message.role !== "bashExecution") return;
+      const result = entry.parentId
+        ? await ctx.fork(entry.parentId, { position: "at" })
+        : await ctx.newSession({ parentSession: ctx.sessionManager.getSessionFile() });
+      if (result.cancelled) throw new Error("A Pi extension cancelled the session fork");
+    },
+  });
+
   // Keep skill chips in the request. Pi expands only one leading /skill:
   // command, so use its own frontmatter loader for every selected chip here.
   pi.on("input", async (event, ctx) => {
@@ -384,7 +421,7 @@ export default async function t3McpExtension(pi: ExtensionAPI) {
   // Tool exposure arrived with registerMcpServer in Pi 0.99. Keep the HTTP
   // bridge as the credential owner: mcp.json overrides native registrations.
   const supportsExposure = "registerMcpServer" in pi && typeof pi.registerMcpServer === "function";
-  const directTools = new Set(["orchestrator_capabilities", "delegate_task", "task_status"]);
+  const directTools = new Set(${JSON.stringify(PI_T3_DIRECT_TOOLS)});
   let deferOptionalTools = supportsExposure;
   let catalog: ReadonlyArray<McpTool> = [];
 

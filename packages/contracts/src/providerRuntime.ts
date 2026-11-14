@@ -1,6 +1,6 @@
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
-import { NonNegativeInt, PositiveInt, TrimmedNonEmptyString } from "./baseSchemas.ts";
+import { IsoDateTime, NonNegativeInt, PositiveInt, TrimmedNonEmptyString } from "./baseSchemas.ts";
 
 const TrimmedNonEmptyStringSchema = TrimmedNonEmptyString;
 
@@ -28,6 +28,8 @@ export function isToolLifecycleItemType(value: string): value is ToolLifecycleIt
 }
 
 export const ThreadTokenUsageSnapshot = Schema.Struct({
+  /** Measurement time, unchanged by status-only thread updates. Optional for older snapshots. */
+  updatedAt: Schema.optional(IsoDateTime),
   usedTokens: NonNegativeInt,
   totalProcessedTokens: Schema.optional(NonNegativeInt),
   maxTokens: Schema.optional(PositiveInt),

@@ -257,6 +257,44 @@ describe("V2 environment commands", () => {
     }).pipe(Effect.provide(layerTestRandom)),
   );
 
+  it.effect("launches Rift without translating the snapshot into a Git worktree", () =>
+    Effect.gen(function* () {
+      const launches: OrchestrationV2ThreadLaunchInput[] = [];
+      const supervisor = yield* makeSupervisor({ commands: [], projects: [], launches });
+      yield* startThreadTurn({
+        commandId: CommandId.make("launch-rift"),
+        threadId: v2ThreadId,
+        message: {
+          messageId: MessageId.make("rift-message"),
+          role: "user",
+          text: "Run",
+          attachments: [],
+        },
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        bootstrap: {
+          createThread: {
+            projectId: ProjectId.make("project-1"),
+            title: "Rift",
+            modelSelection: v2Projection.thread.modelSelection,
+            runtimeMode: "full-access",
+            interactionMode: "default",
+            branch: null,
+            worktreePath: null,
+            createdAt: "2026-06-20T00:00:00.000Z",
+          },
+          prepareWorktree: {
+            workspaceKind: "rift",
+            projectCwd: "/project",
+            baseBranch: "HEAD",
+            branch: "snapshot-task",
+          },
+        },
+      }).pipe(Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, supervisor));
+      expect(launches[0]?.workspaceStrategy).toEqual({ type: "rift", branch: "snapshot-task" });
+    }).pipe(Effect.provide(layerTestRandom)),
+  );
+
   it.effect("uses server-resolved delivery intent without fetching the full projection", () =>
     Effect.gen(function* () {
       const commands: OrchestrationV2Command[] = [];

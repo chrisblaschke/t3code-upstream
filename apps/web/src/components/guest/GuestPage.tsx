@@ -39,6 +39,7 @@ import { useIncrementalTimelineEntries } from "~/hooks/useIncrementalTimelineEnt
 import { useNowMinute } from "~/hooks/useNowMinute";
 import { useStableCallback } from "~/hooks/useStableCallback";
 import { useTheme } from "~/hooks/useTheme";
+import { useClientSettings } from "~/hooks/useSettings";
 import { cn } from "~/lib/utils";
 import { deriveActiveWorkStartedAt, derivePhase } from "~/session-logic";
 import { ComposerControl, ComposerControlIcon } from "../chat/ComposerControl";
@@ -424,6 +425,9 @@ function GuestThread({
   const listRef = useRef<LegendListRef | null>(null);
   const { resolvedTheme } = useTheme();
   // The rest is what ChatView derives from the same projection.
+  const terminalTranscript = useClientSettings(
+    (settings) => settings.transcriptMode === "terminal",
+  );
   const [projectQuestionHistory] = useState(() => createQuestionHistoryProjector());
   const items = projectQuestionHistory(projection);
   // Files load through the guest route.
@@ -480,6 +484,7 @@ function GuestThread({
       <div className="relative min-h-0 flex-1">
         <HostImageUrlContext value={hostImageUrl}>
           <MessagesTimeline
+            terminalTranscript={terminalTranscript}
             listRef={listRef}
             timelineEntries={entries}
             isWorking={isWorking}

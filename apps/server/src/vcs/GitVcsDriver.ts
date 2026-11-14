@@ -37,6 +37,7 @@ import {
 } from "@t3tools/contracts";
 import { isMissingExecutable } from "@t3tools/source-control-core/server/discovery";
 import * as HostProcess from "@t3tools/shared/HostProcess";
+import * as RiftWorkspaces from "./RiftWorkspaces.ts";
 import {
   makeGitVcsDriverCore,
   PATCH_RENDER_PREFIX_ARGS,
@@ -827,11 +828,36 @@ export const makeVcsDriverShape = Effect.fn("makeGitVcsDriverShape")(function* (
     return relativePaths.filter((relativePath) => !ignoredPaths.has(relativePath));
   });
 
-  const initRepository: VcsDriver.VcsDriver["Service"]["initRepository"] = (input) =>
-    gitCommand(vcsProcess, "GitVcsDriver.initRepository", input.cwd, ["init"], {
-      timeoutMs: 10_000,
-      maxOutputBytes: 64 * 1024,
-    }).pipe(Effect.asVoid);
+  const initRepository: VcsDriver.VcsDriver["Service"]["initRepository"] = Effect.fn(
+    "GitVcsDriver.initRepository",
+  )(
+    function* (input) {
+      yield* gitCommand(vcsProcess, "GitVcsDriver.initRepository", input.cwd, ["init"], {
+        timeoutMs: 10_000,
+        maxOutputBytes: 64 * 1024,
+      });
+      if (!(yield* fileSystem.exists(path.join(input.cwd, ".rift")))) return;
+      const exclude = path.join(input.cwd, ".git", "info", "exclude");
+      const contents = yield* fileSystem
+        .readFileString(exclude)
+        .pipe(Effect.orElseSucceed(() => ""));
+      yield* fileSystem.makeDirectory(path.dirname(exclude), { recursive: true });
+      yield* fileSystem.writeFileString(exclude, `${contents}\n/.rift\n`);
+    },
+    (effect, input) =>
+      effect.pipe(
+        Effect.mapError(
+          (cause) =>
+            new VcsProcessExitError({
+              operation: "GitVcsDriver.initRepository",
+              command: "git init",
+              cwd: input.cwd,
+              exitCode: 1,
+              detail: String(cause),
+            }),
+        ),
+      ),
+  );
 
   const resolveHeadCommit = (cwd: string) =>
     execute({
@@ -1668,5 +1694,10 @@ export const make = Effect.gen(function* () {
   return GitVcsDriver.of(git);
 });
 
-export const layerVcs = Layer.effect(VcsDriver.VcsDriver, makeVcsDriver);
-export const layer = Layer.effect(GitVcsDriver, make).pipe(Layer.provide(CheckoutCloner.layer));
+export const layerVcs = Layer.effect(VcsDriver.VcsDriver, makeVcsDriver).pipe(
+  Layer.provide(RiftWorkspaces.layer),
+);
+export const layer = Layer.effect(GitVcsDriver, make).pipe(
+  Layer.provide(RiftWorkspaces.layer),
+  Layer.provide(CheckoutCloner.layer),
+);

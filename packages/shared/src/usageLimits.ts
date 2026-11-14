@@ -6,6 +6,7 @@ import {
   resolveProjectProviderInstanceEnabled,
   type UsageLimitsReport,
   type ProviderInstanceId,
+  ProviderDriverKind,
   type ProviderConsumeResetCreditInput,
   type ServerProviderSlashCommand,
   isProviderAvailable,
@@ -380,16 +381,17 @@ export function collectLimitAccounts(presentations: LimitPresentations): readonl
           accentColor: undefined,
           environments: [],
           sourceLabel,
-          redeem: account.usageLimits.resetCredits?.nextCreditId
-            ? {
-                environmentId,
-                input: {
-                  sourceId: source.id,
-                  accountId: account.id,
-                  creditId: account.usageLimits.resetCredits.nextCreditId,
-                },
-              }
-            : null,
+          redeem:
+            source.kind === "cliproxy" && account.usageLimits.resetCredits?.nextCreditId
+              ? {
+                  environmentId,
+                  input: {
+                    sourceId: source.id,
+                    accountId: account.id,
+                    creditId: account.usageLimits.resetCredits.nextCreditId,
+                  },
+                }
+              : null,
           limits: account.usageLimits,
         });
       }
@@ -756,6 +758,14 @@ export function hasProviderUsageLimits(
   providers: readonly ServerProvider[],
   sources: UsageLimitSourceSnapshots,
 ): boolean {
+  // Pi can spend the backing Codex/Claude accounts without its own snapshot.
+  if (
+    driver === "pi" &&
+    (["codex", "claudeAgent"] as const).some((backing) =>
+      hasProviderUsageLimits(ProviderDriverKind.make(backing), providers, sources),
+    )
+  )
+    return true;
   return (
     providersWithLimits(providers).some((provider) => provider.driver === driver) ||
     sources.some(
@@ -788,15 +798,12 @@ export function withUsageLimitsCommands(
   providers: readonly ServerProvider[],
   sources: UsageLimitSourceSnapshots,
 ): ServerProvider[] {
-  const supportedDrivers = new Set([
-    ...providersWithLimits(providers).map((provider) => provider.driver),
-    ...sources.flatMap((source) => source.accounts.map((account) => account.driver)),
-  ]);
   const unreadableSource = sources.some(
     (source) => source.error !== undefined && source.accounts.length === 0,
   );
   return providers.map((provider) => {
-    if (!unreadableSource && !supportedDrivers.has(provider.driver)) return provider;
+    if (!unreadableSource && !hasProviderUsageLimits(provider.driver, providers, sources))
+      return provider;
     const commands = (items: readonly ServerProviderSlashCommand[]) => [
       ...items.filter((command) => command.name !== USAGE_LIMITS_COMMAND.name),
       USAGE_LIMITS_COMMAND,
@@ -874,7 +881,8 @@ export function collectProviderUsageLimits(
     const hubCredits = sources
       .flatMap((source) => source.accounts.map((account) => ({ source, account })))
       .filter(
-        ({ account }) =>
+        ({ source, account }) =>
+          source.kind === "cliproxy" &&
           key !== null &&
           resolveKey(account) === key &&
           account.usageLimits.resetCredits &&
@@ -922,8 +930,8 @@ export function collectProviderUsageLimits(
         id: `${source.id}:${account.id}`,
         driver: account.driver,
         label: `${source.label} · ${hubAccountName(account)}`,
-        sourceLabel: "CLI Proxy",
-        ...(account.usageLimits.resetCredits?.nextCreditId
+        sourceLabel: source.kind === "cliproxy" ? "CLI Proxy" : source.label,
+        ...(source.kind === "cliproxy" && account.usageLimits.resetCredits?.nextCreditId
           ? {
               resetCreditInput: {
                 sourceId: source.id,

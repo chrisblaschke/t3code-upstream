@@ -16,6 +16,12 @@ function frameType(frame: unknown): unknown {
   return typeof frame === "object" && frame !== null ? Reflect.get(frame, "type") : undefined;
 }
 
+/**
+ * User Stop while Pi runs a bash tool. The adapter clears Pi's queues and
+ * aborts, Pi ends the tool as an error and settles, and the process (with any
+ * extension helpers it runs) stays up. Terminate is only the fallback when the
+ * aborted turn does not settle.
+ */
 export function assertTurnInterruptMidToolPiOutput(
   result: OrchestratorV2ScenarioResult,
   transcript: ProviderReplayTranscript,
@@ -51,10 +57,11 @@ export function assertTurnInterruptMidToolPiOutput(
     projection.providerTurns.map((turn) => turn.status),
     ["interrupted"],
   );
+  // A later rollback can fork at this stopped turn.
   assert.equal(projection.providerTurns[0]?.nativeTurnRef?.strength, "strong");
   assert.deepEqual(
     projection.providerSessions.map((session) => [session.status, session.lastError]),
-    [["stopped", null]],
-    "Stop-with-restart retires the Pi process without reporting an error",
+    [["ready", null]],
+    "Stop aborts the turn but keeps the Pi process (and its extensions' helpers) alive",
   );
 }

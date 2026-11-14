@@ -51,6 +51,7 @@ import {
   decodeJsonReply,
 } from "@t3tools/provider-core/server/textGenerationOperations";
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
+import * as RiftWorkspaces from "../vcs/RiftWorkspaces.ts";
 import * as VcsProcess from "../vcs/VcsProcess.ts";
 import * as VcsDriverRegistry from "../vcs/VcsDriverRegistry.ts";
 import * as VcsProjectConfig from "../vcs/VcsProjectConfig.ts";
@@ -662,6 +663,7 @@ function makeManager(input?: {
     ? Layer.effect(
         GitVcsDriver.GitVcsDriver,
         GitVcsDriver.make.pipe(
+          Effect.provide(RiftWorkspaces.layer),
           Effect.map((service) =>
             GitVcsDriver.GitVcsDriver.of({
               ...service,

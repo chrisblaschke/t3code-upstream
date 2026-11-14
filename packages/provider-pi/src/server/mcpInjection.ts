@@ -1,8 +1,13 @@
+// @effect-diagnostics nodeBuiltinImport:off
+import * as NodeOS from "node:os";
+import * as NodePath from "node:path";
+
 import { tokenizeCliArgs } from "@t3tools/shared/cliArgs";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 
 import type { McpProviderSessionConfig } from "@t3tools/provider-core/server/mcpSession";
+import { expandHomePath } from "@t3tools/provider-core/server/pathExpansion";
 import {
   PI_T3_MCP_EXTENSION_FILENAME,
   PI_T3_MCP_EXTENSION_SOURCE,
@@ -246,6 +251,18 @@ export const materializePiT3McpExtension = Effect.fn("materializePiT3McpExtensio
   return dest;
 });
 
+/**
+ * Pi's agent directory as Pi resolves it: `PI_CODING_AGENT_DIR` (with `~`
+ * expanded, made absolute) or `~/.pi/agent`. Every T3 path under it (helper
+ * sessions, spawn records) must come from here so prefix checks agree.
+ */
+export function resolvePiAgentDir(environment: NodeJS.ProcessEnv, cwd = process.cwd()): string {
+  const configured = environment.PI_CODING_AGENT_DIR?.trim();
+  return configured
+    ? NodePath.resolve(cwd, expandHomePath(configured, NodeOS.homedir()))
+    : NodePath.join(NodeOS.homedir(), ".pi", "agent");
+}
+
 export function buildPiRpcLaunch(input: {
   readonly launchArgs: ReadonlyArray<string>;
   readonly environment: NodeJS.ProcessEnv;
@@ -302,6 +319,8 @@ export function buildPiRpcLaunch(input: {
     args,
     env: {
       ...environment,
+      // The adapter shows a multi-question select as one card (see piStructuredQuestions).
+      T3_PI_STRUCTURED_QUESTIONS: "1",
       ...(hasT3Extension && input.extensionPath !== undefined
         ? { [T3_PI_MCP_EXTENSION_PATH_ENV]: input.extensionPath }
         : {}),

@@ -758,6 +758,7 @@ export function useComposerSend(input: ComposerSendInput) {
     const {
       missingWorktreeBaseBranch,
       baseBranchForWorktree,
+      workspaceKind,
       compactBeforeSend,
       turnDispatchMode,
       shouldQueueBehindActiveRun,
@@ -1079,7 +1080,8 @@ export function useComposerSend(input: ComposerSendInput) {
       await sendToMultipleModels({
         threadId: threadIdForSend,
         project: activeProject,
-        branch: activeThreadBranch!,
+        branch: activeThreadBranch ?? "HEAD",
+        workspaceKind,
         selections: multipleModelSelections,
         targets: multipleTargets,
         sendSnapshot,
@@ -1233,6 +1235,7 @@ export function useComposerSend(input: ComposerSendInput) {
                     prepareWorktree: {
                       projectCwd: activeProject.workspaceRoot,
                       baseBranch: baseBranchForWorktree,
+                      ...(workspaceKind ? { workspaceKind } : {}),
                       ...(startFromOrigin ? { startFromOrigin: true } : {}),
                     },
                     runSetupScript: true,

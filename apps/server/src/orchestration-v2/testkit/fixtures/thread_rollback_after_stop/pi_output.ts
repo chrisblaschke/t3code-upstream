@@ -25,7 +25,11 @@ function outboundOfType(transcript: ProviderReplayTranscript, type: string) {
   );
 }
 
-/** Stop kills Pi; read the stopped turn's session-tree user entry first. */
+/**
+ * Stop aborts the turn and keeps Pi running (terminating only as a fallback),
+ * and the stopped turn's session-tree user entry is read as it settles. Rolling back to turn 1 then forks
+ * at that entry, which discards the stopped turn and everything after it.
+ */
 export function assertPiThreadRollbackAfterStopOutput(
   result: OrchestratorV2ScenarioResult,
   transcript: ProviderReplayTranscript,

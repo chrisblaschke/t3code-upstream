@@ -369,7 +369,8 @@ export function ThreadMcpApp(props: {
           commandId: CommandId.make(uuidv4()),
           text,
           attachments: [],
-          dispatchMode: "queue",
+          // Like web: an app or page reply steers the running turn, or starts one.
+          dispatchMode: "steer",
           createdAt: new Date().toISOString(),
         });
       },

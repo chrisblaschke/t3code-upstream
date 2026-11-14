@@ -8,6 +8,10 @@ export function createShellEnvironmentAtoms<R, E>(
   runtime: Atom.AtomRuntime<EnvironmentRegistry | R, E>,
 ) {
   return {
+    openExternalTerminal: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:shell:open-external-terminal",
+      tag: WS_METHODS.shellOpenExternalTerminal,
+    }),
     openInEditor: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:shell:open-in-editor",
       tag: WS_METHODS.shellOpenInEditor,

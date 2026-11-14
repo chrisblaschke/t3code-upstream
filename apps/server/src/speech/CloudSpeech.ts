@@ -13,6 +13,8 @@ import {
   type SpeechTranscriptionOptions,
 } from "@t3tools/contracts";
 import * as SecretResolver from "@t3tools/secret-provider-core/server/SecretResolver";
+import * as HostProcess from "@t3tools/shared/HostProcess";
+import * as Clock from "effect/Clock";
 import { cloudSpeechLanguages, effectiveSpeechLanguage } from "@t3tools/shared/speech";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
@@ -25,6 +27,7 @@ import * as ServerSettings from "../serverSettings.ts";
 import { requireSettingsSecret } from "../secrets/settingsSecretValue.ts";
 import { applySpeechAliases } from "./customWords.ts";
 import { removeSpeechFillerWords } from "./fillerWords.ts";
+import { hasGrokLogin, readGrokAuth, refreshGrokLogin, resolveGrokToken } from "./grokLogin.ts";
 import { decodeSpeechPcm, SpeechInvalidAudioError } from "./SpeechService.ts";
 
 const endpoints = {
@@ -126,15 +129,19 @@ export const layer = Layer.effect(
     const settings = yield* ServerSettings.ServerSettingsService;
     const resolver = yield* SecretResolver.SecretResolver;
     const http = yield* HttpClient.HttpClient;
+    const home = yield* HostProcess.HomeDirectory;
+    const clock = yield* Clock.Clock;
     const credentials = settings.getSettings.pipe(
       Effect.map((value) => value.cloudSpeechCredentials),
     );
     const configured = credentials.pipe(
-      Effect.map(({ openai, xai, openrouter }) => ({
-        openai: Boolean(openai),
-        xai: Boolean(xai),
-        openrouter: Boolean(openrouter),
-      })),
+      Effect.flatMap(({ openai, xai, openrouter }) =>
+        Effect.promise(async () => ({
+          openai: Boolean(openai),
+          xai: Boolean(xai) || hasGrokLogin(await readGrokAuth(home)),
+          openrouter: Boolean(openrouter),
+        })),
+      ),
     );
     const execute = (request: HttpClientRequest.HttpClientRequest) =>
       http
@@ -186,7 +193,18 @@ export const layer = Layer.effect(
         model?: string,
       ) {
         const source = (yield* credentials)[provider];
-        if (!source) return yield* new CloudSpeechError({ provider, reason: "missing-key" });
+        const grokToken =
+          !source && provider === "xai"
+            ? yield* Effect.promise(() =>
+                resolveGrokToken({
+                  readAuth: () => readGrokAuth(home),
+                  refresh: () => refreshGrokLogin(home),
+                  now: () => clock.currentTimeMillisUnsafe(),
+                }),
+              )
+            : undefined;
+        if (!source && !grokToken)
+          return yield* new CloudSpeechError({ provider, reason: "missing-key" });
         if (provider === "openrouter" && (!model || !isModelId(model)))
           return yield* new CloudSpeechError({ provider, reason: "model-unavailable" });
         const samples = yield* Effect.try({
@@ -203,10 +221,11 @@ export const layer = Layer.effect(
         // A vault that locked since the last recording must not authorize a new upload.
         if (isSecretReference(source)) yield* resolver.invalidate([source]);
         const unreadable = () => new CloudSpeechError({ provider, reason: "unreadable-key" });
-        const key = yield* requireSettingsSecret(resolver, source).pipe(
-          Effect.mapError(unreadable),
-        );
-        if (!isApiKey(key)) return yield* unreadable();
+        const key = source
+          ? yield* requireSettingsSecret(resolver, source).pipe(Effect.mapError(unreadable))
+          : grokToken!;
+        // OIDC tokens are not API-key settings and can exceed their length limit.
+        if (source && !isApiKey(key)) return yield* unreadable();
         const audio = wave(samples);
         const request = HttpClientRequest.post(endpoints[provider].url).pipe(
           HttpClientRequest.bearerToken(Redacted.make(key)),
@@ -217,7 +236,7 @@ export const layer = Layer.effect(
         const unavailable = () => new CloudSpeechError({ provider, reason: "unavailable" });
         // A catalog fetch or vault lookup may have outlived the credential it started with.
         const current = (yield* credentials)[provider];
-        if (!current || !sameCredential(source, current))
+        if (source ? !current || !sameCredential(source, current) : Boolean(current))
           return yield* new CloudSpeechError({
             provider,
             reason: current ? "key-changed" : "missing-key",

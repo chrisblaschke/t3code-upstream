@@ -2224,46 +2224,59 @@ it.effect("shared intake preserves durable attachment bytes after a lost launch 
   }).pipe(Effect.provide(Layer.mergeAll(harness.layer, layerFiles)));
 });
 
-it.effect("cancels tracked setup before provider work is released", () =>
-  Effect.gen(function* () {
-    const entered = yield* Deferred.make<void>();
-    const renamed = yield* Deferred.make<void>();
-    const harness = makeHarness({
-      renameBranch: (input) =>
-        Deferred.succeed(renamed, undefined).pipe(Effect.as({ branch: input.newBranch })),
-      runSetup: () =>
-        Deferred.await(renamed).pipe(
-          Effect.andThen(Deferred.succeed(entered, undefined)),
-          Effect.andThen(Effect.never),
-        ),
-    });
-    yield* Effect.gen(function* () {
-      const launches = yield* ThreadLaunch.ThreadLaunchService;
-      const tracker = yield* WorktreeSetupTracker.WorktreeSetupTracker;
-      const threads = yield* ThreadManagement.ThreadManagementService;
-      const outbox = yield* EffectOutbox.EffectOutboxV2;
-      const input = launchInput({
-        command: "launch:cancel-tracked",
-        thread: "thread:cancel-tracked",
-        message: "Start",
-        workspace: { type: "worktree", baseRef: "main" },
+it.effect.each(["worktree", "rift"] as const)(
+  "cancels %s setup after branch rename before provider work is released",
+  (workspaceType) =>
+    Effect.gen(function* () {
+      const entered = yield* Deferred.make<void>();
+      const renamed = yield* Deferred.make<void>();
+      const harness = makeHarness({
+        renameBranch: (input) =>
+          Deferred.succeed(renamed, undefined).pipe(Effect.as({ branch: input.newBranch })),
+        runSetup: () =>
+          Deferred.await(renamed).pipe(
+            Effect.andThen(Deferred.succeed(entered, undefined)),
+            Effect.andThen(Effect.never),
+          ),
       });
-      const launched = yield* launches.launch(input);
-      yield* Deferred.await(entered);
-      assert.equal((yield* tracker.get(launched.threadId))?.phase, "running");
-      assert.isTrue(yield* tracker.cancel(launched.threadId));
-      assert.equal((yield* tracker.get(launched.threadId))?.phase, "cancelled");
-      const projection = yield* threads.getThreadProjection(launched.threadId);
-      assert.equal(projection.runs[0]?.status, "failed");
-      assert.isNull(projection.thread.worktreePath);
-      assert.deepEqual(harness.deleteLocalBranch.mock.calls[0]?.[0], {
-        cwd: "/repo",
-        refName: "generated-branch",
-        force: true,
-      });
-      assert.isEmpty(yield* outbox.listByCommandId(CommandId.make(`${input.commandId}:release`)));
-    }).pipe(Effect.provide(harness.layer));
-  }),
+      yield* Effect.gen(function* () {
+        const launches = yield* ThreadLaunch.ThreadLaunchService;
+        const tracker = yield* WorktreeSetupTracker.WorktreeSetupTracker;
+        const threads = yield* ThreadManagement.ThreadManagementService;
+        const outbox = yield* EffectOutbox.EffectOutboxV2;
+        const input = launchInput({
+          command: "launch:cancel-tracked",
+          thread: "thread:cancel-tracked",
+          message: "Start",
+          workspace:
+            workspaceType === "rift" ? { type: "rift" } : { type: "worktree", baseRef: "main" },
+        });
+        const launched = yield* launches.launch(input);
+        yield* Deferred.await(entered);
+        assert.equal((yield* tracker.get(launched.threadId))?.phase, "running");
+        assert.isTrue(yield* tracker.cancel(launched.threadId));
+        assert.equal((yield* tracker.get(launched.threadId))?.phase, "cancelled");
+        const projection = yield* threads.getThreadProjection(launched.threadId);
+        assert.equal(projection.runs[0]?.status, "failed");
+        assert.isNull(projection.thread.worktreePath);
+        assert.equal(harness.renameBranch.mock.calls[0]?.[0].newBranch, "generated-branch");
+        assert.deepEqual(harness.removeWorktree.mock.calls[0]?.[0], {
+          cwd: "/repo",
+          path: "/repo-worktrees/feature",
+          force: true,
+        });
+        if (workspaceType === "rift") {
+          assert.equal(harness.deleteLocalBranch.mock.calls.length, 0);
+        } else {
+          assert.deepEqual(harness.deleteLocalBranch.mock.calls[0]?.[0], {
+            cwd: "/repo",
+            refName: "generated-branch",
+            force: true,
+          });
+        }
+        assert.isEmpty(yield* outbox.listByCommandId(CommandId.make(`${input.commandId}:release`)));
+      }).pipe(Effect.provide(harness.layer));
+    }),
 );
 
 it.effect(
@@ -2409,9 +2422,13 @@ it.effect.each([0, 1])("releases an async setup before its completion with exit 
   }),
 );
 
-it.effect.each(["origin/master", ":/initial"])(
-  "refuses a worktree in a non-Git project before checking base %s",
-  (baseRef) =>
+it.effect.each([
+  { type: "worktree", baseRef: "origin/master", startFromOrigin: true },
+  { type: "worktree", baseRef: ":/initial", startFromOrigin: true },
+  { type: "rift" },
+] as const)(
+  "refuses a $type in a non-Git project before accepting the launch",
+  (workspaceStrategy) =>
     Effect.gen(function* () {
       const harness = makeHarness({
         git: { repositoryRoot: () => Effect.succeed(null) },
@@ -2421,7 +2438,7 @@ it.effect.each(["origin/master", ":/initial"])(
         const result = yield* launches
           .checkWorktreeBase({
             projectId,
-            workspaceStrategy: { type: "worktree", baseRef, startFromOrigin: true },
+            workspaceStrategy,
           })
           .pipe(Effect.result);
         assert.isTrue(Result.isFailure(result));
@@ -2562,4 +2579,147 @@ it.effect("replays an accepted send after the project disables the instance", ()
       assert.fail(`expected ThreadManagementProviderInstanceDisabledError, got ${fresh._tag}`);
     }
   }).pipe(Effect.provide(Layer.mergeAll(harness.layer, layerFiles)));
+});
+
+it.effect("launches a rift thread from HEAD without fetching or selecting a base branch", () =>
+  Effect.gen(function* () {
+    const fetchWorktreeBaseCommit = vi.fn(() => Effect.die("rift launches never fetch"));
+    const harness = makeHarness({ fetchWorktreeBaseCommit });
+    yield* Effect.gen(function* () {
+      const launches = yield* ThreadLaunch.ThreadLaunchService;
+      const threads = yield* ThreadManagement.ThreadManagementService;
+      const launched = yield* launches.launch(
+        launchInput({
+          command: "command:launch:rift",
+          thread: "thread:launch:rift",
+          message: "Keep my current edits",
+          workspace: { type: "rift" },
+        }),
+      );
+      const settled = yield* preparationSettled(launched.threadId);
+      assert.equal(settled.runs[0]?.status, "starting");
+      const created = harness.createWorktree.mock.calls[0]?.[0];
+      assert.equal(created?.workspaceKind, "rift");
+      assert.equal(created?.refName, "HEAD");
+      assert.match(created?.newRefName ?? "", /^t3\/[0-9a-f]{8}$/u);
+      assert.equal(fetchWorktreeBaseCommit.mock.calls.length, 0);
+      const projection = yield* threads.getThreadProjection(launched.threadId);
+      assert.equal(projection.thread.worktreePath, "/repo-worktrees/feature");
+      assert.equal(projection.checkpointScopes[0]?.cwd, "/repo-worktrees/feature");
+    }).pipe(Effect.provide(harness.layer));
+  }),
+);
+
+it.effect("retries Rift setup in the existing copy without creating another snapshot", () => {
+  let attempts = 0;
+  const harness = makeHarness({
+    runSetup: () =>
+      ++attempts === 1
+        ? Effect.die("setup failed")
+        : Effect.succeed({ status: "no-script" as const }),
+  });
+  return Effect.gen(function* () {
+    const launches = yield* ThreadLaunch.ThreadLaunchService;
+    const threads = yield* ThreadManagement.ThreadManagementService;
+    const launched = yield* launches.launch(
+      launchInput({
+        command: "command:launch:rift-retry",
+        thread: "thread:launch:rift-retry",
+        message: "Retry setup",
+        workspace: { type: "rift" },
+      }),
+    );
+    const failed = yield* preparationSettled(launched.threadId);
+    assert.equal(failed.runs[0]?.status, "failed");
+    assert.equal(failed.thread.worktreePath, "/repo-worktrees/feature");
+    yield* launches.retryPreparation({
+      commandId: CommandId.make("command:launch:rift-retry:again"),
+      threadId: launched.threadId,
+      runId: failed.runs[0]!.id,
+    });
+    yield* threads.streamStoredEventsFrom({ threadId: launched.threadId }).pipe(
+      Stream.filter((stored) => stored.commandId === "command:launch:rift-retry:again:release"),
+      Stream.runHead,
+    );
+    assert.equal(harness.createWorktree.mock.calls.length, 1);
+    assert.equal(harness.runSetup.mock.calls.length, 2);
+    assert.equal(harness.runSetup.mock.calls[1]?.[0].worktreePath, "/repo-worktrees/feature");
+  }).pipe(Effect.provide(harness.layer));
+});
+
+it.effect.each([
+  { locallyPresent: true, name: "uses a locally present full commit without contacting origin" },
+  {
+    locallyPresent: false,
+    name: "fetches origin when the requested full commit is not present locally",
+  },
+])("$name", ({ locallyPresent }) => {
+  const commit = "1234567890abcdef1234567890abcdef12345678";
+  let available = locallyPresent;
+  const fetchRemote = vi.fn(() =>
+    Effect.sync(() => {
+      available = true;
+    }),
+  );
+  const resolveWorktreeBaseRemote = vi.fn(() => Effect.die("commit has no branch"));
+  const remoteExists = vi.fn(() => Effect.succeed(true));
+  const harness = makeHarness({
+    hasCommit: ({ refName }) => Effect.succeed(refName === commit && available),
+    remoteExists,
+    git: { fetchRemote, resolveWorktreeBaseRemote },
+  });
+  return Effect.gen(function* () {
+    const launches = yield* ThreadLaunch.ThreadLaunchService;
+    const launched = yield* launches.launch(
+      launchInput({
+        command: `command:launch:full-commit:${locallyPresent}`,
+        thread: `thread:launch:full-commit:${locallyPresent}`,
+        message: "Start from this commit",
+        workspace: { type: "worktree", baseRef: commit, startFromOrigin: true },
+      }),
+    );
+    const projection = yield* preparationSettled(launched.threadId);
+    assert.equal(projection.runs[0]?.status, "starting");
+    assert.equal(harness.createWorktree.mock.calls[0]?.[0].refName, commit);
+    assert.equal(fetchRemote.mock.calls.length, locallyPresent ? 0 : 1);
+    assert.equal(remoteExists.mock.calls.length, locallyPresent ? 0 : 1);
+    assert.equal(resolveWorktreeBaseRemote.mock.calls.length, 0);
+  }).pipe(Effect.provide(harness.layer));
+});
+
+it.effect("reports the manual initialization hint when a rift launch is not ready", () => {
+  const detail = `Run \`rift init\` in ${project.workspaceRoot} once, while nothing is working in this project.`;
+  const fetchWorktreeBaseCommit = vi.fn(() => Effect.die("rift launches never fetch"));
+  const harness = makeHarness({
+    fetchWorktreeBaseCommit,
+    createWorktree: () =>
+      Effect.fail(
+        new GitCommandError({
+          operation: "RiftWorkspaces.create",
+          command: "rift",
+          cwd: project.workspaceRoot,
+          detail,
+        }),
+      ),
+  });
+  return Effect.gen(function* () {
+    const launches = yield* ThreadLaunch.ThreadLaunchService;
+    const launched = yield* launches.launch(
+      launchInput({
+        command: "command:launch:rift-not-ready",
+        thread: "thread:launch:rift-not-ready",
+        message: "Copy the project",
+        workspace: { type: "rift" },
+      }),
+    );
+    const projection = yield* preparationSettled(launched.threadId);
+    assert.equal(projection.runs[0]?.status, "failed");
+    assert.include(
+      projection.turnItems.find((item) => item.type === "error")?.failure.message ?? "",
+      detail,
+    );
+    assert.isNull(projection.thread.worktreePath);
+    assert.equal(harness.runSetup.mock.calls.length, 0);
+    assert.equal(fetchWorktreeBaseCommit.mock.calls.length, 0);
+  }).pipe(Effect.provide(harness.layer));
 });

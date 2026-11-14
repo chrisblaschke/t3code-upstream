@@ -78,13 +78,19 @@ const MAX_METADATA_OPERATIONS_PER_SOURCE = MAX_TRANSCRIPTS_PER_SOURCE * 4;
 const MAX_METADATA_RECORDS_PER_SOURCE = 100_000;
 const MAX_METADATA_RECORDS_PER_TRANSCRIPT = 1_000;
 const RECENT_THREAD_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
-// Screenshot-heavy transcripts can reach GiB; select fields while streaming to avoid allocating payloads.
+const CANDIDATE_CACHE_MS = 5 * 1000;
+/**
+ * Large tool results (especially screenshots) can make an otherwise ordinary
+ * Codex transcript several GiB. Streaming field selection avoids allocating
+ * those payloads.
+ */
 const MAX_IMPORTED_TRANSCRIPT_BYTES = 4 * 1024 * 1024 * 1024;
 const MAX_IMPORTED_MESSAGES = 200;
 const MAX_IMPORT_HISTORY_BYTES = 32 * 1024 * 1024;
 const MAX_IMPORT_BYTES = 4 * 1024 * 1024 * 1024;
 const MAX_IMPORT_TRANSCRIPTS = 100;
 const MAX_IMPORT_RECORDS = 100_000;
+const encodeProviderInstances = Schema.encodeEffect(Schema.fromJsonString(Schema.Unknown));
 
 /**
  * open() of a file under macOS privacy protection waits on a consent prompt
@@ -110,6 +116,7 @@ const TranscriptMessage = Schema.Struct({
   role: Schema.optional(Schema.String),
   content: Schema.optional(Schema.Union([Schema.String, Schema.Array(TranscriptContentBlock)])),
   model: Schema.optional(Schema.String),
+  provider: Schema.optional(Schema.String),
 });
 
 const CodexTurnMetadata = Schema.Struct({
@@ -125,6 +132,9 @@ const TranscriptRecord = Schema.Struct({
   timestamp: Schema.optional(Schema.String),
   cwd: Schema.optional(Schema.String),
   sessionId: Schema.optional(Schema.String),
+  parentSession: Schema.optional(Schema.String),
+  provider: Schema.optional(Schema.String),
+  modelId: Schema.optional(Schema.String),
   aiTitle: Schema.optional(Schema.String),
   customTitle: Schema.optional(Schema.String),
   isSidechain: Schema.optional(Schema.Boolean),
@@ -177,7 +187,10 @@ const decodeCodexSessionIndexEntry = Schema.decodeUnknownOption(
   Schema.fromJsonString(CodexSessionIndexEntry),
 );
 
-type DecodedTranscriptRecord = typeof TranscriptRecord.Type;
+export type DecodedTranscriptRecord = typeof TranscriptRecord.Type;
+
+/** Decode an already parsed Pi entry once, alongside the follower's raw entry. */
+export const decodePiTranscriptEntry = decodeTranscriptValue;
 
 interface AgentSessionTranscriptMetadata {
   readonly source: AgentSessionSource;
@@ -202,6 +215,8 @@ export interface AgentSessionThread {
   readonly updatedAt: string;
   readonly messages: ReadonlyArray<AgentSessionThreadMessage>;
   readonly omittedMessageCount: number;
+  /** Pi only: the session tree leaf the imported history ends at. */
+  readonly nativeHeadId?: string;
 }
 
 export type AgentSessionRecentThread =
@@ -221,6 +236,14 @@ export class AgentSessionScanner extends Context.Service<
     readonly recentThreads: (
       workspaceRoot: string,
       completedSources?: ReadonlyArray<AgentSessionImportSource>,
+      /**
+       * Session files T3 Code threads are bound to. These, and the files they
+       * were forked from, are T3's own history and are never imported.
+       */
+      boundTranscripts?: ReadonlySet<string>,
+      sources?: ReadonlyArray<AgentSessionSource>,
+      /** Live sync batch timestamp: share discovery within a batch, never across file events. */
+      discoveryBatch?: number,
     ) => Stream.Stream<AgentSessionRecentThread, AgentSessionScanError>;
   }
 >()("t3/project/AgentSessionScanner") {}
@@ -284,6 +307,20 @@ function splitTranscriptRecords(contents: string, limit: number): string[] {
 
 function isTextContentBlock(block: typeof TranscriptContentBlock.Type): boolean {
   return block.type === "text" || block.type === "input_text" || block.type === "output_text";
+}
+
+// Pi stores an expanded skill invocation; show what the user typed instead.
+const PI_SKILL_BLOCK =
+  /^<skill name="([^"]+)" location="[^"]+">\n[\s\S]*?\n<\/skill>(?:\n\n([\s\S]+))?$/;
+
+function piMessageText(
+  role: "user" | "assistant",
+  content: Parameters<typeof extractText>[0],
+): string {
+  const text = extractText(content);
+  if (role !== "user") return text;
+  const skill = PI_SKILL_BLOCK.exec(text);
+  return skill === null ? text : `/skill:${skill[1]}${skill[2] ? ` ${skill[2].trim()}` : ""}`;
 }
 
 function extractText(
@@ -382,7 +419,14 @@ function codexHistoryBase(records: ReadonlyArray<DecodedTranscriptRecord>) {
 }
 
 function deriveTitle(source: AgentSessionSource, text: string): string | undefined {
-  const request = source === "codex" ? text.replace(CODEX_TITLE_PREAMBLE, "") : text;
+  // A Pi session often opens with a bare skill such as `/skill:recall`; the
+  // first real request makes a better title.
+  const request =
+    source === "codex"
+      ? text.replace(CODEX_TITLE_PREAMBLE, "")
+      : source === "pi"
+        ? text.replace(/^\/skill:\S+\s*/, "")
+        : text;
   return request.trim().split("\n")[0]?.slice(0, 100).trim() || undefined;
 }
 
@@ -441,7 +485,7 @@ function parseAgentSessionRecords(
   droppedMessageCount: number,
 ): AgentSessionThread | null {
   const fallbackTimestamp = DateTime.formatIso(DateTime.makeUnsafe(input.lastActiveAtMs));
-  // Claude filenames are session IDs. Codex rollout filenames include extra
+  // Claude filenames are session IDs. Codex and Pi filenames include extra
   // timestamp text, so only transcript metadata can provide a resumable ID.
   let providerSessionId =
     input.source === "codex"
@@ -545,15 +589,31 @@ function parseAgentSessionRecords(
     return false;
   };
 
+  let nativeHeadId: string | undefined;
   let recordIndex = -1;
   for (const record of input.source === "pi" ? activePiBranch(records) : records) {
     recordIndex += 1;
     if (input.source === "pi") {
+      if (record.type !== "session" && record.id !== undefined) nativeHeadId = record.id;
+      if (record.type === "model_change") {
+        const provider = record.provider?.trim();
+        const modelId = record.modelId?.trim();
+        if (provider && modelId) model = `${provider}/${modelId}`;
+        continue;
+      }
       if (!isPiConversationRecord(record)) continue;
-      const text = extractText(record.message.content);
+      const role = record.message.role;
+      // Pi restores the last model on the active branch, including assistant-only
+      // records with no visible text. Its model slug includes the API provider.
+      if (role === "assistant") {
+        const provider = record.message?.provider?.trim();
+        const modelId = record.message?.model?.trim();
+        if (provider && modelId) model = `${provider}/${modelId}`;
+      }
+      const text = piMessageText(role, record.message?.content);
       if (text.length === 0) continue;
       retainMessage({
-        role: record.message.role,
+        role,
         text,
         createdAt: normalizeTimestamp(record.timestamp, fallbackTimestamp),
         codexResponseUser: false,
@@ -646,13 +706,64 @@ function parseAgentSessionRecords(
     source: input.source,
     providerInstanceId: input.providerInstanceId,
     providerSessionId,
-    title: claudeFields.customTitle ?? title ?? derivedTitle ?? "Imported thread",
+    title:
+      claudeFields.customTitle ??
+      title ??
+      derivedTitle ??
+      // A Pi session of only bare skills keeps the skill as its title.
+      (input.source === "pi"
+        ? deriveTitle("claudeAgent", visibleFirstUserMessage.text)
+        : undefined) ??
+      "Imported thread",
     model,
     createdAt: retainedMessages[0]?.createdAt ?? fallbackTimestamp,
     updatedAt: fallbackTimestamp,
     messages: retainedMessages,
     omittedMessageCount: conversationMessageCount + droppedMessageCount - retainedMessages.length,
+    ...(nativeHeadId === undefined ? {} : { nativeHeadId }),
   };
+}
+
+/**
+ * Messages added to a Pi session after `headId` on its active branch, for
+ * threads that follow a session file. Null when `headId` is no longer on the
+ * active branch (the session was rewound elsewhere), so callers never guess.
+ */
+export function piMessagesAfterHead(
+  contents: string | ReadonlyArray<DecodedTranscriptRecord>,
+  /** Null reads the whole active branch (a followed file seen for the first time). */
+  headId: string | null,
+  fallbackTimestamp: string,
+): {
+  readonly leafId: string;
+  readonly messages: ReadonlyArray<AgentSessionThreadMessage & { readonly id: string }>;
+} | null {
+  const records =
+    typeof contents === "string"
+      ? splitTranscriptRecords(contents, MAX_IMPORT_RECORDS + 1).flatMap((line) =>
+          Option.toArray(decodeTranscriptRecord(line)),
+        )
+      : contents;
+  const branch = activePiBranch(records).filter((record) => record.type !== "session");
+  const headIndex = headId === null ? -1 : branch.findIndex((record) => record.id === headId);
+  const leafId = branch.at(-1)?.id;
+  if ((headId !== null && headIndex === -1) || leafId === undefined) return null;
+  const messages = branch.slice(headIndex + 1).flatMap((record) => {
+    const role = record.message?.role;
+    if (record.type !== "message" || (role !== "user" && role !== "assistant")) return [];
+    const text = piMessageText(role, record.message?.content);
+    if (text.length === 0 || record.id === undefined) return [];
+    const createdAt = normalizeTimestamp(record.timestamp, fallbackTimestamp);
+    return [
+      {
+        id: record.id,
+        role: role === "user" ? ("user" as const) : ("assistant" as const),
+        text,
+        createdAt,
+      },
+    ];
+  });
+  return { leafId, messages };
 }
 
 function extractDecodedCwd(record: DecodedTranscriptRecord): string | null {
@@ -818,6 +929,16 @@ export const make = Effect.gen(function* () {
   const worktreesDir = path.resolve(serverConfig.worktreesDir);
   const isWindows = (yield* HostProcess.Platform) === "win32";
   const foldWorktreeCase = isWindows;
+  // Compare both spellings: candidate real paths may resolve a symlink in the
+  // configured roots (including macOS /var -> /private/var).
+  const baseDirs = [
+    baseDir,
+    yield* fileSystem.realPath(baseDir).pipe(Effect.orElseSucceed(() => baseDir)),
+  ];
+  const worktreesDirs = [
+    worktreesDir,
+    yield* fileSystem.realPath(worktreesDir).pipe(Effect.orElseSucceed(() => worktreesDir)),
+  ];
   const hostEnvironment = yield* HostProcess.Environment;
   const homeDir = yield* HostProcess.HomeDirectory;
   // `/private/tmp` is what macOS reports for sessions started in `/tmp`.
@@ -838,10 +959,14 @@ export const make = Effect.gen(function* () {
         normalizeForWorktreeMatch(ancestor, foldWorktreeCase),
       ),
     ) ||
-    normalizeForWorktreeMatch(candidatePath, foldWorktreeCase).startsWith(
-      normalizeForWorktreeMatch(baseDir, foldWorktreeCase),
+    baseDirs.some((directory) =>
+      normalizeForWorktreeMatch(candidatePath, foldWorktreeCase).startsWith(
+        normalizeForWorktreeMatch(directory, foldWorktreeCase),
+      ),
     ) ||
-    isT3ManagedWorktree(candidatePath, worktreesDir, foldWorktreeCase);
+    worktreesDirs.some((directory) =>
+      isT3ManagedWorktree(candidatePath, directory, foldWorktreeCase),
+    );
 
   const listDirectory = (directory: string) =>
     fileSystem.readDirectory(directory).pipe(Effect.orElseSucceed((): ReadonlyArray<string> => []));
@@ -1500,11 +1625,12 @@ export const make = Effect.gen(function* () {
     }));
   });
 
-  const collectCandidates = Effect.fn("AgentSessionScanner.collectCandidates")(function* () {
-    const settings = yield* serverSettings.getSettings.pipe(
-      Effect.mapError((cause) => new AgentSessionScanError({ operation: "read-settings", cause })),
-    );
-
+  const readSettings = serverSettings.getSettings.pipe(
+    Effect.mapError((cause) => new AgentSessionScanError({ operation: "read-settings", cause })),
+  );
+  const collectCandidates = Effect.fn("AgentSessionScanner.collectCandidates")(function* (
+    settings: Effect.Success<typeof readSettings>,
+  ) {
     const raw: Array<RawCandidate> = [];
     let truncated = false;
 
@@ -1624,11 +1750,24 @@ export const make = Effect.gen(function* () {
     return { candidates: raw, truncated };
   });
 
-  let cachedCandidates: ReadonlyArray<RawCandidate> | null = null;
+  // One scan serves a burst of per-project imports; later imports rescan so
+  // sessions started since then are found.
+  let cachedCandidates: {
+    readonly candidates: ReadonlyArray<RawCandidate>;
+    readonly atMs: number;
+    readonly settingsKey: string;
+    readonly discoveryBatch: number | undefined;
+  } | null = null;
 
   const scan: AgentSessionScanner["Service"]["scan"] = Effect.gen(function* () {
-    const { candidates: raw, truncated } = yield* collectCandidates();
-    cachedCandidates = raw;
+    const settings = yield* readSettings;
+    const { candidates: raw, truncated } = yield* collectCandidates(settings);
+    cachedCandidates = {
+      candidates: raw,
+      discoveryBatch: undefined,
+      atMs: DateTime.toEpochMillis(yield* DateTime.now),
+      settingsKey: yield* encodeProviderInstances(settings.providerInstances).pipe(Effect.orDie),
+    };
 
     const merged = new Map<
       string,
@@ -1757,10 +1896,70 @@ export const make = Effect.gen(function* () {
     };
   });
 
+  // Bound transcripts span every project. Cache headers by file identity so
+  // project-by-project sync does not reopen all of them on each pass.
+  const parentSessionHeaders = new Map<
+    string,
+    { readonly identity: TranscriptIdentity; readonly parent: string | null }
+  >();
+
+  /** The `parentSession` a forked Pi session file records in its header line. */
+  const readParentSession = Effect.fnUntraced(function* (filePath: string) {
+    const stats = yield* fileSystem.stat(filePath).pipe(Effect.option);
+    if (Option.isNone(stats)) {
+      parentSessionHeaders.delete(filePath);
+      return null;
+    }
+    const identity = transcriptIdentity(filePath, stats.value);
+    const cached = parentSessionHeaders.get(filePath);
+    if (cached !== undefined && sameTranscriptIdentity(cached.identity, identity))
+      return cached.parent;
+    const result = yield* Effect.scoped(
+      fileSystem
+        .open(filePath, { flag: "r" })
+        .pipe(Effect.flatMap((file) => file.readAlloc(METADATA_READ_BYTES))),
+    ).pipe(
+      Effect.map((chunk) => {
+        if (Option.isNone(chunk)) return null;
+        const firstLine = new TextDecoder().decode(chunk.value).split("\n", 1)[0] ?? "";
+        const header = decodeTranscriptRecord(firstLine);
+        return Option.isSome(header) && header.value.type === "session"
+          ? header.value.parentSession?.trim() || null
+          : null;
+      }),
+      Effect.option,
+    );
+    // A transient read failure must be retried even if the file did not change.
+    if (Option.isNone(result)) return null;
+    if (parentSessionHeaders.size >= MAX_TRANSCRIPTS_PER_SOURCE) parentSessionHeaders.clear();
+    parentSessionHeaders.set(filePath, { identity, parent: result.value });
+    return result.value;
+  });
+
+  /** T3 rewinds and forks create Pi session files whose ancestors T3 also owns. */
+  const withForkAncestors = Effect.fn("AgentSessionScanner.withForkAncestors")(function* (
+    files: ReadonlySet<string>,
+  ) {
+    const owned = new Set<string>();
+    const pending = [...files];
+    while (pending.length > 0 && owned.size < MAX_TRANSCRIPTS_PER_SOURCE) {
+      const filePath = pending.pop()!;
+      if (owned.has(filePath)) continue;
+      owned.add(filePath);
+      const parent = yield* readParentSession(filePath);
+      if (parent !== null) pending.push(parent);
+    }
+    return owned;
+  });
+
   const prepareRecentThreads = Effect.fn("AgentSessionScanner.prepareRecentThreads")(function* (
     workspaceRoot: string,
     completedSources: ReadonlyArray<AgentSessionImportSource>,
+    boundTranscripts: ReadonlySet<string>,
+    sources?: ReadonlyArray<AgentSessionSource>,
+    discoveryBatch?: number,
   ) {
+    const ownedTranscripts = yield* withForkAncestors(boundTranscripts);
     const root = path.resolve(expandHomePath(workspaceRoot, homeDir));
     const realRoot = yield* fileSystem.realPath(root).pipe(Effect.orElseSucceed(() => root));
     if (isExcludedProjectPath(root) || isExcludedProjectPath(realRoot)) return Stream.empty;
@@ -1768,14 +1967,27 @@ export const make = Effect.gen(function* () {
     const nowMs = DateTime.toEpochMillis(yield* DateTime.now);
     const cutoffMs = nowMs - RECENT_THREAD_WINDOW_MS;
 
-    const candidates = cachedCandidates ?? (yield* collectCandidates()).candidates;
-    cachedCandidates = candidates;
+    const settings = yield* readSettings;
+    const settingsKey = yield* encodeProviderInstances(settings.providerInstances).pipe(
+      Effect.orDie,
+    );
+    const candidates =
+      cachedCandidates !== null &&
+      cachedCandidates.settingsKey === settingsKey &&
+      cachedCandidates.discoveryBatch === discoveryBatch &&
+      nowMs - cachedCandidates.atMs < CANDIDATE_CACHE_MS
+        ? cachedCandidates.candidates
+        : (yield* collectCandidates(settings)).candidates;
+    if (cachedCandidates?.candidates !== candidates) {
+      cachedCandidates = { candidates, atMs: nowMs, settingsKey, discoveryBatch };
+    }
 
     const eligibleTranscripts: Array<{
       readonly candidate: RawCandidate;
       readonly transcript: RawCandidate["transcripts"][number] & { readonly mtimeMs: number };
     }> = [];
     for (const candidate of candidates) {
+      if (sources !== undefined && !sources.includes(candidate.source)) continue;
       const expanded = expandHomePath(candidate.cwd.trim(), homeDir);
       if (!path.isAbsolute(expanded)) continue;
       const resolved = path.resolve(expanded);
@@ -1783,6 +1995,7 @@ export const make = Effect.gen(function* () {
 
       for (const transcript of candidate.transcripts) {
         if (
+          ownedTranscripts.has(transcript.filePath) ||
           transcript.mtimeMs === null ||
           transcript.mtimeMs < cutoffMs ||
           transcript.mtimeMs > nowMs
@@ -1977,7 +2190,19 @@ export const make = Effect.gen(function* () {
   const recentThreads: AgentSessionScanner["Service"]["recentThreads"] = (
     workspaceRoot,
     completedSources = [],
-  ) => Stream.unwrap(prepareRecentThreads(workspaceRoot, completedSources));
+    boundTranscripts = new Set(),
+    sources,
+    discoveryBatch,
+  ) =>
+    Stream.unwrap(
+      prepareRecentThreads(
+        workspaceRoot,
+        completedSources,
+        boundTranscripts,
+        sources,
+        discoveryBatch,
+      ),
+    );
 
   return AgentSessionScanner.of({ scan, recentThreads });
 });

@@ -17,8 +17,16 @@ import {
   buildPiRpcLaunch,
   materializePiT3McpExtension,
   resolvePiLaunchArgs,
+  resolvePiAgentDir,
 } from "./mcpInjection.ts";
 import { PI_T3_MCP_EXTENSION_SOURCE } from "./mcpExtensionSource.ts";
+
+it("resolves a relative agent directory against the child cwd", () => {
+  assert.equal(
+    resolvePiAgentDir({ PI_CODING_AGENT_DIR: ".pi-custom" }, "/project"),
+    "/project/.pi-custom",
+  );
+});
 
 const threadId = ThreadId.make("thread-pi-t3-mcp");
 

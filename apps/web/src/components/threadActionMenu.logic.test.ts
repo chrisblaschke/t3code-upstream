@@ -26,6 +26,22 @@ const baseState: ThreadActionMenuState = {
 };
 
 describe("buildThreadActionMenuItems", () => {
+  it("uses terminal permission independently of orchestration permission for Pi", () => {
+    const items = buildThreadActionMenuItems({
+      ...baseState,
+      canOperate: false,
+      canOpenPiTerminal: true,
+    });
+    const pi = items.find((item) => item.id === "open-pi-terminal");
+    expect(pi?.label).toBe("Open in Pi terminal");
+    expect(pi?.disabled).not.toBe(true);
+    expect(
+      buildThreadActionMenuItems({ ...baseState, canOpenPiTerminal: false }).some(
+        (item) => item.id === "open-pi-terminal",
+      ),
+    ).toBe(false);
+  });
+
   it.each([false, true])(
     "disables both lifecycle directions without permission (reversed: %s)",
     (reversed) => {

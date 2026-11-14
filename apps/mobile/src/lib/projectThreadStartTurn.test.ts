@@ -9,6 +9,33 @@ import {
 } from "./projectThreadStartTurn";
 
 describe("project thread title", () => {
+  it("provisions a Rift copy on its own branch without reusing the current checkout", () => {
+    const input = buildProjectThreadStartTurnInput({
+      projectId: ProjectId.make("project"),
+      projectCwd: "/repo",
+      threadId: "thread",
+      commandId: "command",
+      messageId: "message",
+      createdAt: "2026-10-29T06:00:00Z",
+      text: "Implement feature",
+      uploadedAttachments: [],
+      modelSelection: { instanceId: ProviderInstanceId.make("pi"), model: "model" },
+      runtimeMode: "full-access",
+      interactionMode: "default",
+      workspaceMode: "rift",
+      branch: "main",
+      worktreePath: "/old-worktree",
+      startFromOrigin: true,
+      worktreeBranchName: "t3code-copy",
+    });
+    expect(input.bootstrap.createThread.worktreePath).toBeNull();
+    expect(input.bootstrap.prepareWorktree).toEqual({
+      workspaceKind: "rift",
+      projectCwd: "/repo",
+      baseBranch: "main",
+      branch: "t3code-copy",
+    });
+  });
   it.each([
     {
       type: "image" as const,

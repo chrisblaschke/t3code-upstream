@@ -1,6 +1,7 @@
 import {
   CommandId,
   type EnvironmentId,
+  MessageId,
   NodeId,
   OrchestratorMcpFailure,
   type OrchestratorMcpDelegateTaskInput,
@@ -13,13 +14,17 @@ import {
   type ProviderInstanceId,
   ProviderDriverKind,
   type RunId,
+  RuntimeRequestId,
   type ThreadId,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as SecureRandom from "effect/crypto/SecureRandom";
+import * as Digest from "effect/crypto/Digest";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Hex from "effect/encoding/Hex";
+import * as Semaphore from "effect/Semaphore";
 import * as Option from "effect/Option";
 import * as Schedule from "effect/Schedule";
 import * as Scope from "effect/Scope";
@@ -27,8 +32,11 @@ import * as Stream from "effect/Stream";
 import type * as Tool from "effect/ai/Tool";
 import { withExecutedModelNote } from "@t3tools/provider-core/server/subagentProjection";
 
+import { reportLabel } from "@t3tools/provider-core/server/notification";
+
 import type * as McpInvocationContext from "../mcp/McpInvocationContext.ts";
 import { ProjectToolkit } from "../mcp/toolkits/project/tools.ts";
+import { ThreadToolkit } from "../mcp/toolkits/thread/tools.ts";
 import {
   resolveInteractionMode,
   resolveRuntimeMode,
@@ -45,6 +53,8 @@ import * as PeerLinks from "./PeerLinks.ts";
 
 /** How long one follow of a remote task waits on its thread there before checking again. */
 const FOLLOW_WAIT_MS = 10 * 60 * 1_000;
+const QUESTION_POLL = Duration.seconds(15);
+const QUESTION_PROBE_TIMEOUT = Duration.seconds(5);
 /** A linked environment that stops answering is retried, backing off to this. */
 const FOLLOW_MAX_BACKOFF = Duration.minutes(5);
 /** How a follower retries; tests step it by hand. */
@@ -77,8 +87,26 @@ export class RemoteDelegation extends Context.Service<
         readonly target: NonNullable<OrchestratorMcpDelegateTaskInput["target"]> & {
           readonly environmentId: EnvironmentId;
         };
+        /** The parent checkout's commit, which `isolation: "worktree"` checks out there. */
+        readonly parentCommit?: string | undefined;
       },
     ) => Effect.Effect<{ readonly taskId: NodeId }, OrchestratorMcpFailure>;
+    /**
+     * The questions the task's thread there is waiting on. Nothing when the
+     * task has ended; an error when the other machine does not answer.
+     */
+    readonly pendingQuestions: (
+      scope: ThreadScope,
+      task: OrchestrationV2Subagent,
+      options?: { readonly acknowledge?: boolean | undefined },
+    ) => Effect.Effect<ReadonlyArray<RuntimeRequestId>, OrchestratorMcpFailure>;
+    /** Acknowledge only the question ids carried by a delivered wait snapshot. */
+    readonly acknowledgeQuestions: (
+      scope: ThreadScope,
+      taskId: NodeId,
+      remote: OrchestrationV2RemoteTaskChild,
+      ids: ReadonlyArray<RuntimeRequestId>,
+    ) => Effect.Effect<void, OrchestratorMcpFailure>;
     /**
      * Stops the task's thread there, then completes it here as cancelled. A
      * task that already has its result keeps it; its thread there is still
@@ -124,6 +152,7 @@ const make = Effect.gen(function* () {
   const projects = yield* ProjectService.ProjectService;
   const repositoryIdentities = yield* RepositoryIdentityResolver.RepositoryIdentityResolver;
   const random = yield* SecureRandom.SecureRandom;
+  const crypto = yield* Digest.Digest;
   const hereId = yield* ServerEnvironment.ServerEnvironment.pipe(
     Effect.flatMap((environment) => environment.getEnvironmentId),
   );
@@ -212,15 +241,20 @@ const make = Effect.gen(function* () {
       }
       const parentNodeId = parentRun.rootNodeId;
       const { target } = input;
-      // A worktree there would branch from a commit this checkout has and the
-      // other may not, so a remote task runs in that project's checkout.
-      if (input.isolation === "worktree") {
+      // A worktree there checks out this checkout's commit, fetching origin
+      // only if absent there; a rift snapshots the checkout there.
+      if (input.isolation === "worktree" && input.parentCommit === undefined) {
         return yield* new OrchestratorMcpFailure({
           code: "invalid_request",
-          message:
-            'A task in a linked environment runs in that project\'s checkout; isolation "worktree" is not supported there. Omit isolation, or use t3_thread_launch with environmentId and a worktree workspaceStrategy.',
+          message: "Unable to resolve the parent checkout commit.",
         });
       }
+      const workspaceStrategy =
+        input.isolation === "worktree" && input.parentCommit !== undefined
+          ? ({ type: "worktree", baseRef: input.parentCommit, startFromOrigin: true } as const)
+          : input.isolation === "rift"
+            ? ({ type: "rift" } as const)
+            : undefined;
       // The provider and model inherit as they do for a task here. Another
       // provider there has no model to inherit, so the caller names one.
       const inherited = parent.thread.modelSelection;
@@ -259,6 +293,19 @@ const make = Effect.gen(function* () {
       // Both are scoped to the provider session, as every key a caller passes is:
       // the forwarder scopes the launch's, and the record's names it.
       const key = input.clientRequestId ?? (yield* random.uuidV4());
+      // Either component may fill the caller's 256-character limit. Hash an
+      // unambiguous tuple to preserve retries without exceeding that limit.
+      const launchKey = yield* crypto
+        .digest(
+          Digest.sha256,
+          new TextEncoder().encode(
+            `${scope.thread.threadId.length}:${scope.thread.threadId}${key}`,
+          ),
+        )
+        .pipe(
+          Effect.map((digest) => `delegate:${Hex.encode(digest)}`),
+          Effect.orDie,
+        );
       const task = taskPrompt(input);
       const title = input.title ?? parent.thread.title;
       const launched = yield* forwarding.call(
@@ -272,7 +319,8 @@ const make = Effect.gen(function* () {
           ...(runtimeMode === undefined ? {} : { runtimeMode }),
           ...(interactionMode === undefined ? {} : { interactionMode }),
           message: task,
-          clientRequestId: `delegate:${scope.thread.threadId}:${key}`,
+          ...(workspaceStrategy === undefined ? {} : { workspaceStrategy }),
+          clientRequestId: launchKey,
           // The thread there shows it is this thread's subagent, with a way back.
           delegatedFrom: {
             environmentId: hereId,
@@ -383,7 +431,7 @@ const make = Effect.gen(function* () {
         status,
         result,
         ...(stoppedThere === undefined ? {} : { stoppedThere }),
-        ...(stopCount === undefined ? {} : { stopCount }),
+        ...(stoppedThere === undefined ? {} : { stopCount: stopCount ?? 0 }),
       })
       .pipe(
         Effect.catch((error) =>
@@ -658,6 +706,208 @@ const make = Effect.gen(function* () {
       Effect.map(({ task }) => task?.remoteChild?.stoppedThere === true),
     );
 
+  const pendingThere = (scope: ThreadScope, remote: OrchestrationV2RemoteTaskChild) =>
+    forwarding
+      .call(scope, ThreadToolkit.tools.t3_pending_request, remote.environmentId, {
+        action: "list",
+        environmentId: remote.environmentId,
+        threadId: remote.threadId,
+      })
+      .pipe(
+        Effect.flatMap((result) =>
+          "requestIds" in result
+            ? Effect.succeed(result.requestIds)
+            : Effect.die("Remote pending-request list returned an unexpected result"),
+        ),
+      );
+
+  // Wait delivery and asynchronous delivery share a lock: an acknowledgement
+  // withdraws any queued wake and prevents a concurrent probe from requeuing it.
+  const questionDelivery = yield* Semaphore.make(1);
+  const observedQuestions = new Map<NodeId, Set<RuntimeRequestId>>();
+
+  const pendingQuestions: RemoteDelegation["Service"]["pendingQuestions"] = (
+    scope,
+    task,
+    options,
+  ) =>
+    task.remoteChild === undefined || task.result !== null
+      ? Effect.succeed([])
+      : pendingThere(scope, task.remoteChild).pipe(
+          Effect.timeout(QUESTION_PROBE_TIMEOUT),
+          Effect.tap((ids) =>
+            options?.acknowledge !== true
+              ? Effect.void
+              : acknowledgeQuestions(scope, task.id, task.remoteChild!, ids),
+          ),
+          Effect.mapError((error) =>
+            error._tag === "OrchestratorMcpFailure"
+              ? error
+              : new OrchestratorMcpFailure({
+                  code: "orchestration_error",
+                  message: `Unable to check pending questions on linked environment "${task.remoteChild!.environmentId}": ${error.message}`,
+                }),
+          ),
+        );
+
+  const acknowledgeQuestions: RemoteDelegation["Service"]["acknowledgeQuestions"] = (
+    scope,
+    taskId,
+    remote,
+    ids,
+  ) =>
+    questionDelivery.withPermits(1)(
+      Effect.gen(function* () {
+        const observed = observedQuestions.get(taskId) ?? new Set<RuntimeRequestId>();
+        observedQuestions.set(taskId, observed);
+        for (const id of ids) {
+          observed.add(id);
+          yield* withdrawQuestion(scope.thread.threadId, remote, id).pipe(
+            Effect.mapError(
+              (error) =>
+                new OrchestratorMcpFailure({
+                  code: "orchestration_error",
+                  message: `Unable to acknowledge remote question ${id}: ${error.message}`,
+                }),
+            ),
+          );
+        }
+      }),
+    );
+
+  /** One key per question, so each wakes its parent once however often it is seen. */
+  const questionKey = (
+    parentThreadId: ThreadId,
+    remote: OrchestrationV2RemoteTaskChild,
+    requestId: RuntimeRequestId,
+  ) => `${parentThreadId}:${remote.environmentId}:${remote.threadId}:${requestId}`;
+
+  /**
+   * Tells the parent its task there asked a question, as a local task's
+   * question does, with what it needs to answer it there.
+   */
+  const askParent = (
+    parentThreadId: ThreadId,
+    task: OrchestrationV2Subagent,
+    remote: OrchestrationV2RemoteTaskChild,
+    requestId: RuntimeRequestId,
+  ) => {
+    const key = questionKey(parentThreadId, remote, requestId);
+    const label = reportLabel(task.title?.trim() || task.prompt);
+    return threads.dispatch({
+      type: "message.dispatch",
+      commandId: CommandId.make(`server:remote-task-question:${key}`),
+      threadId: parentThreadId,
+      messageId: MessageId.make(`message:remote-task-question:${key}`),
+      text: `Delegated task ${task.id}, running in ${remote.label}, asked a question and may be blocked until it is answered. Read it with t3_pending_request action "read" using environmentId ${remote.environmentId}, threadId ${remote.threadId} and requestId ${requestId}. Answer it with t3_pending_request action "respond", passing the same environmentId and threadId, when the answer follows from the task or the user's instructions; otherwise ask the user, then answer it. If it is no longer pending, it was answered or dismissed.`,
+      notification: {
+        source: { kind: "delegated_task", taskIds: [task.id] },
+        outcome: "updated",
+        summary: `Delegated task${label === undefined ? "" : ` "${label}"`} has a question`,
+      },
+      attachments: [],
+      dispatchMode: { type: "queue_after_active" },
+      createdBy: "agent",
+      creationSource: "server",
+    });
+  };
+
+  /** A question answered there before its parent got to it no longer starts a turn. */
+  const withdrawQuestion = Effect.fn("RemoteDelegation.withdrawQuestion")(function* (
+    parentThreadId: ThreadId,
+    remote: OrchestrationV2RemoteTaskChild,
+    requestId: RuntimeRequestId,
+  ) {
+    const key = questionKey(parentThreadId, remote, requestId);
+    const messageId = MessageId.make(`message:remote-task-question:${key}`);
+    const { runs } = yield* threads.getThreadRecords(parentThreadId, ["runs"]);
+    const queued = runs.find((run) => run.status === "queued" && run.userMessageId === messageId);
+    if (queued === undefined) return;
+    yield* threads.dispatch({
+      type: "queued-run.cancel",
+      commandId: CommandId.make(`server:remote-task-question-cancel:${key}`),
+      threadId: parentThreadId,
+      runId: queued.id,
+    });
+  });
+
+  /**
+   * While a task runs there, checks its thread for questions and puts each
+   * new one to the parent here. Runs beside the follower and ends with it.
+   */
+  const checkQuestions = Effect.fn("RemoteDelegation.checkQuestions")(function* (
+    parentThreadId: ThreadId,
+    taskId: NodeId,
+    questions: { readonly asked: Set<RuntimeRequestId>; recovered: boolean },
+  ) {
+    const { asked } = questions;
+    const records = yield* threads.getThreadRecords(parentThreadId, ["subagents"], {
+      subagentIds: [taskId],
+    });
+    const task = records.subagents.find((candidate) => candidate.id === taskId);
+    if (
+      task?.remoteChild === undefined ||
+      task.result !== null ||
+      task.completionDelivery?.state === "disposed" ||
+      records.thread.archivedAt !== null ||
+      records.thread.deletedAt !== null
+    )
+      return;
+    // As for a local task, a blocking delegate_task wait delivers the
+    // question itself; once that run ends, the next check tells the parent.
+    if (task.completionWake === "settled_only" && task.runId !== null) {
+      const { runs } = yield* threads.getThreadRecords(parentThreadId, ["runs"], {
+        runIds: [task.runId],
+      });
+      if (runs.some(ThreadManagement.isActiveRun)) return;
+    }
+    const remote = task.remoteChild;
+    const scope = followScope(
+      { threadId: parentThreadId, providerInstanceId: records.thread.providerInstanceId },
+      remote,
+    );
+    const pending = yield* pendingThere(scope, remote);
+    yield* questionDelivery.withPermits(1)(
+      Effect.gen(function* () {
+        if (!questions.recovered) {
+          // A restart loses the in-memory set, but a question answered while
+          // offline must not leave its queued wake behind until the task ends.
+          const prefix = `message:remote-task-question:${parentThreadId}:${remote.environmentId}:${remote.threadId}:`;
+          const { runs } = yield* threads.getThreadRecords(parentThreadId, ["runs"]);
+          for (const run of runs) {
+            if (run.status === "queued" && run.userMessageId.startsWith(prefix)) {
+              asked.add(RuntimeRequestId.make(run.userMessageId.slice(prefix.length)));
+            }
+          }
+          questions.recovered = true;
+        }
+        for (const requestId of pending) {
+          if (asked.has(requestId) || observedQuestions.get(taskId)?.has(requestId)) continue;
+          yield* askParent(parentThreadId, task, remote, requestId);
+          asked.add(requestId);
+        }
+        for (const requestId of asked) {
+          if (pending.includes(requestId)) continue;
+          yield* withdrawQuestion(parentThreadId, remote, requestId);
+          asked.delete(requestId);
+        }
+      }),
+    );
+  });
+  const watchQuestions = (
+    parentThreadId: ThreadId,
+    taskId: NodeId,
+    questions: { readonly asked: Set<RuntimeRequestId>; recovered: boolean },
+  ) =>
+    checkQuestions(parentThreadId, taskId, questions).pipe(
+      // The other machine asleep or a dropped route: look again next time.
+      Effect.catchCause((cause) =>
+        Effect.logDebug("remote-delegation.question-check-failed", { taskId, cause }),
+      ),
+      Effect.repeat(Schedule.spaced(QUESTION_POLL)),
+      Effect.asVoid,
+    );
+
   const following = new Map<NodeId, { again: boolean }>();
 
   /**
@@ -674,7 +924,70 @@ const make = Effect.gen(function* () {
       }
       const state = { again: false };
       following.set(taskId, state);
+      const questions = { asked: new Set<RuntimeRequestId>(), recovered: false };
       return follow(parentThreadId, taskId).pipe(
+        Effect.raceFirst(
+          watchQuestions(parentThreadId, taskId, questions).pipe(Effect.andThen(Effect.never)),
+        ),
+        Effect.tap(() =>
+          questionDelivery.withPermits(1)(
+            Effect.gen(function* () {
+              const { subagents, runs } = yield* threads.getThreadRecords(parentThreadId, [
+                "subagents",
+                "runs",
+              ]);
+              const remote = subagents.find((task) => task.id === taskId)?.remoteChild;
+              if (remote !== undefined) {
+                // Include wakes recovered after a restart, not just this watcher’s set.
+                const prefix = `message:remote-task-question:${parentThreadId}:${remote.environmentId}:${remote.threadId}:`;
+                for (const run of runs) {
+                  if (run.status !== "queued" || !run.userMessageId.startsWith(prefix)) continue;
+                  yield* threads
+                    .dispatch({
+                      type: "queued-run.cancel",
+                      commandId: CommandId.make(
+                        `server:remote-task-question-cancel:${run.userMessageId.slice("message:remote-task-question:".length)}`,
+                      ),
+                      threadId: parentThreadId,
+                      runId: run.id,
+                    })
+                    .pipe(
+                      Effect.catch((cause) =>
+                        Effect.gen(function* () {
+                          // The snapshot can race a start or cancellation. Neither
+                          // needs cleanup, and neither may stop the other wakes.
+                          const current = yield* threads.getThreadRecords(parentThreadId, ["runs"]);
+                          if (
+                            current.runs.some(
+                              (entry) => entry.id === run.id && entry.status === "queued",
+                            )
+                          ) {
+                            yield* Effect.logWarning("remote-delegation.question-cancel-failed", {
+                              taskId,
+                              runId: run.id,
+                              cause,
+                            });
+                          }
+                        }),
+                      ),
+                    );
+                }
+              }
+            }).pipe(
+              // Startup follows all recovered tasks together. Cleanup of one
+              // task must never interrupt the other followers.
+              Effect.catchCause((cause) =>
+                Effect.logWarning("remote-delegation.question-cleanup-failed", { taskId, cause }),
+              ),
+              Effect.ensuring(
+                Effect.sync(() => {
+                  observedQuestions.delete(taskId);
+                  questions.asked.clear();
+                }),
+              ),
+            ),
+          ),
+        ),
         // Checked and released in one step, so a request between them is never lost.
         Effect.repeat({
           while: () => {
@@ -793,7 +1106,7 @@ const make = Effect.gen(function* () {
       }).pipe(Effect.ignoreCause({ log: true })),
     );
 
-  return RemoteDelegation.of({ delegate, cancel, start });
+  return RemoteDelegation.of({ delegate, pendingQuestions, acknowledgeQuestions, cancel, start });
 });
 
 const isTerminal = (status: string) =>

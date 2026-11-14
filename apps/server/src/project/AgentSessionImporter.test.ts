@@ -95,6 +95,29 @@ function candidate(
   } satisfies AgentSessionScanner.AgentSessionRecentThread;
 }
 
+it.each(["user", "assistant"] as const)(
+  "keeps the supplied run on imported %s messages",
+  (role) => {
+    const runId = RunId.make("pi-cli-run:thread:1");
+    const events = AgentSessionImporter.messageEvents({
+      threadId: ThreadId.make("pi-cli-thread"),
+      index: 0,
+      ordinal: 3,
+      suffix: `native-${role}`,
+      runId,
+      message: { role, text: "CLI follow-up", createdAt: timestamp },
+    });
+    expect(events.find((event) => event.type === "message.updated")?.payload).toMatchObject({
+      runId,
+      role,
+    });
+    expect(events.find((event) => event.type === "turn-item.updated")?.payload).toMatchObject({
+      runId,
+      ordinal: 3,
+    });
+  },
+);
+
 const PI_MODEL_SELECTION = { instanceId: ProviderInstanceId.make("pi"), model: "default" };
 
 // Pi threads are owned by their session file path, not the session UUID.
@@ -788,3 +811,100 @@ it.effect("imports under a policy ceiling in the project's default, kept under t
     );
   }).pipe(Effect.scoped, Effect.provide(persistence)),
 );
+it.effect("retains the saved Pi model slug when creating an imported thread", () =>
+  Effect.gen(function* () {
+    const projections = yield* ProjectionStore.ProjectionStoreV2;
+    const modelSelection = {
+      instanceId: ProviderInstanceId.make("pi-work"),
+      model: "openrouter/google/gemini",
+    };
+    const source = candidate(modelSelection, "saved-model", "pi");
+    const importer = yield* makeImporter([source]);
+
+    expect(yield* importer.run).toEqual({ importedCount: 1, skippedCount: 0 });
+    const thread = yield* projections.getThread(importId(source));
+    expect(thread.modelSelection).toEqual(modelSelection);
+  }).pipe(Effect.scoped, Effect.provide(persistence)),
+);
+
+it.effect("binds an imported Pi session by its file path and tree head", () => {
+  const writes: Array<ReadonlyArray<OrchestrationV2DomainEvent>> = [];
+  const piInstanceId = ProviderInstanceId.make("pi");
+  const discoveryBatches: Array<number | undefined> = [];
+  const activeSinceMs = Date.parse(timestamp) - 60_000;
+  const filePath = "/home/user/.pi/agent/sessions/--project--/2026-09-01_pi-session.jsonl";
+  const scanner = AgentSessionScanner.AgentSessionScanner.of({
+    scan: Effect.die("unused"),
+    recentThreads: (_workspaceRoot, _completedSources, _boundTranscripts, _sources, batch) => {
+      discoveryBatches.push(batch);
+      return Stream.succeed({
+        _tag: "Importable",
+        source: {
+          provider: "pi",
+          providerInstanceId: piInstanceId,
+          providerSessionId: "pi-session",
+          filePath,
+          size: 100,
+          mtimeMs: 2,
+          device: 3,
+          inode: 4,
+          birthtimeMs: 1,
+        },
+        thread: {
+          source: "pi",
+          providerInstanceId: piInstanceId,
+          providerSessionId: "pi-session",
+          title: "From the terminal",
+          model: null,
+          createdAt: "2026-09-01T10:00:00.000Z",
+          updatedAt: "2026-09-01T10:01:00.000Z",
+          messages: [{ role: "user", text: "Hi", createdAt: "2026-09-01T10:00:00.000Z" }],
+          nativeHeadId: "leaf1234",
+          omittedMessageCount: 0,
+        },
+      });
+    },
+  });
+  const testLayer = AgentSessionImporter.layer.pipe(
+    Layer.provide(
+      Layer.mergeAll(
+        Layer.succeed(AgentSessionScanner.AgentSessionScanner, scanner),
+        Layer.mock(ProjectService.ProjectService)({
+          getById: () =>
+            Effect.succeedSome({ id: projectId, workspaceRoot: "/workspace/project" } as never),
+        }),
+        Layer.mock(Orchestrator.OrchestratorV2)({
+          getThreadRecords: (threadId) =>
+            Effect.fail(new Orchestrator.OrchestratorProjectionError({ threadId })),
+        }),
+        Layer.mock(EventSink.EventSinkV2)({
+          write: (input) => Effect.sync(() => (writes.push(input.events), [])),
+        }),
+        Layer.mock(ProviderSessionRuntime.ProviderSessionRuntimeRepository)({
+          list: () => Effect.succeed([]),
+          upsert: () => Effect.void,
+          recordImportedTranscript: () => Effect.void,
+        }),
+        IdAllocator.layer,
+        Layer.mock(ProviderAdapterRegistry.ProviderAdapterRegistryV2)({}),
+        ThreadCommandExecutor.layer,
+      ),
+    ),
+  );
+
+  return Effect.gen(function* () {
+    const importer = yield* AgentSessionImporter.AgentSessionImporter;
+    yield* importer.importRecentAgentThreads({ projectId }, { sources: ["pi"], activeSinceMs });
+    expect(discoveryBatches).toEqual([activeSinceMs]);
+    const providerThread = writes[0]?.find((event) => event.type === "provider-thread.updated");
+    const created = writes[0]?.find((event) => event.type === "thread.created");
+    expect(created?.payload).toMatchObject({
+      id: ThreadId.make("import:pi:pi-session"),
+      modelSelection: { instanceId: piInstanceId, model: "default" },
+    });
+    expect(providerThread?.payload).toMatchObject({
+      nativeThreadRef: { driver: "pi", nativeId: filePath },
+      nativeConversationHeadRef: { driver: "pi", nativeId: "leaf1234" },
+    });
+  }).pipe(Effect.provide(testLayer.pipe(Layer.provide(ServerSettings.layerTest()))));
+});

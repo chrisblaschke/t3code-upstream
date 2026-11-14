@@ -88,7 +88,8 @@ import {
 } from "../lib/composerContextRecords";
 import type { ComposerDispatchMode } from "@t3tools/client-runtime/state/composer-dispatch";
 import type { DraftThreadEnvMode } from "../composerDraftStore";
-import { type ComposerSubmissionIntent } from "../composer-logic";
+import { resolveSendEnvMode as resolveSharedSendEnvMode } from "@t3tools/shared/projectSettings";
+import type { ComposerSubmissionIntent } from "../composer-logic";
 import type { ReviewCommentContext } from "../reviewCommentContext";
 import { derivePhase, type TimelineEntry } from "../session-logic";
 import type { PreviewMiniPlayerSource } from "../previewMiniPlayerStore";
@@ -101,6 +102,23 @@ import {
 } from "../providerInstances";
 
 type ThreadProjection = EnvironmentThread["projection"];
+
+/** Restore only after the new controlled value has reached the editor. */
+export function restoreComposerCursor(
+  composerRef: {
+    current: {
+      resetCursorState: (options: { prompt: string; cursor: number }) => void;
+      focusAtEnd: () => void;
+    } | null;
+  },
+  prompt: string,
+  isCurrentThread: () => boolean,
+): number {
+  composerRef.current?.resetCursorState({ prompt, cursor: prompt.length });
+  return requestAnimationFrame(() => {
+    if (isCurrentThread()) composerRef.current?.focusAtEnd();
+  });
+}
 type ThreadStructureRow = ThreadStructure["visibleTurnItems"][number];
 
 export const LAST_INVOKED_SCRIPT_BY_PROJECT_KEY = "t3code:last-invoked-script-by-project";
@@ -680,7 +698,18 @@ export function collectUserMessageBlobPreviewUrls(message: ChatMessage): string[
 
 export { readFileAsDataUrl } from "../lib/imageCompression";
 
-export { resolveSendEnvMode } from "@t3tools/shared/projectSettings";
+export function resolveSendEnvMode(input: {
+  requestedEnvMode: DraftThreadEnvMode;
+  isGitRepo: boolean;
+}): DraftThreadEnvMode {
+  // Rift snapshots non-git workspaces too; the server must reject stale capabilities.
+  return input.requestedEnvMode === "rift"
+    ? "rift"
+    : resolveSharedSendEnvMode({
+        requestedEnvMode: input.requestedEnvMode,
+        isGitRepo: input.isGitRepo,
+      });
+}
 
 export function resolveBackgroundDraftWorkspaceOptions(input: {
   envMode: DraftThreadEnvMode;
@@ -1302,6 +1331,7 @@ export function planComposerTurn(input: {
     !input.sendQueuesBehindSetup && (!input.isServerThread || input.activeMessageCount === 0);
   const shouldCreateWorktree =
     isFirstMessage && input.sendEnvMode === "worktree" && !input.worktreePath;
+  const shouldCreateRift = isFirstMessage && input.sendEnvMode === "rift" && !input.worktreePath;
   // A stale Claude session compacts before this message so the turn does not re-read the
   // old history. The message queues behind the /compact run, since steering into it is
   // rejected.
@@ -1318,7 +1348,12 @@ export function planComposerTurn(input: {
     // In worktree mode, require an explicit base branch so we don't silently
     // fall back to local execution when branch selection is missing.
     missingWorktreeBaseBranch: shouldCreateWorktree && !input.activeThreadBranch,
-    baseBranchForWorktree: shouldCreateWorktree ? input.activeThreadBranch : null,
+    baseBranchForWorktree: shouldCreateRift
+      ? "HEAD"
+      : shouldCreateWorktree
+        ? input.activeThreadBranch
+        : null,
+    workspaceKind: shouldCreateRift ? ("rift" as const) : undefined,
     compactBeforeSend,
     turnDispatchMode:
       compactBeforeSend || input.sendQueuesBehindSetup ? ("queue" as const) : dispatchMode,

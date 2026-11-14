@@ -68,7 +68,7 @@ export function childInputNowItem(input: {
       ? "Side chat waiting"
       : "Subagent waiting",
     description: childThreadInputs.map((child, index) => (
-      <Fragment key={child.id}>
+      <Fragment key={`${child.environmentId}:${child.id}`}>
         {index > 0 ? " " : null}
         <span className="whitespace-nowrap">
           <InlineButton tone="muted" onClick={() => onOpenThread(child.id, child.environmentId)}>

@@ -43,6 +43,25 @@ export function WorkLogList({ children }: { children: ReactNode }) {
   );
 }
 
+/**
+ * A call another row made (e.g. inside a codemode script), indented under its
+ * parent like the parent's details: one `ms-7` step per nesting level.
+ */
+export function WorkLogIndent({ depth, children }: { depth: number; children: ReactNode }) {
+  if (depth <= 0) return children;
+  return (
+    <GroupedRows value>
+      <div
+        data-work-log-depth={depth}
+        className="flex min-w-0 flex-col"
+        style={{ marginInlineStart: `${depth * 1.75}rem` }}
+      >
+        {children}
+      </div>
+    </GroupedRows>
+  );
+}
+
 type RowContent = {
   icon?: ReactNode;
   label: ReactNode;

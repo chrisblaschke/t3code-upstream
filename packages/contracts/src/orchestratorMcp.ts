@@ -172,9 +172,9 @@ export const OrchestratorMcpDelegateTaskInput = Schema.Struct({
   title: Schema.optional(OrchestratorMcpTitle),
   role: Schema.optional(OrchestratorMcpTaskRole),
   isolation: Schema.optional(
-    Schema.Literals(["shared", "worktree"]).annotate({
+    Schema.Literals(["shared", "worktree", "rift"]).annotate({
       description:
-        "'shared' (default): parent checkout. 'worktree': new prepared checkout from the parent commit, for a separate checkout or PR per child. Uncommitted edits stay out.",
+        "'shared' (default): parent checkout. 'worktree': new prepared checkout from the parent commit; uncommitted edits stay out. Use worktrees for one PR per child. Local 'rift': copy-on-write snapshot of the project root including uncommitted and ignored files; refused when the parent has its own worktree or Rift copy (use 'shared' there).",
     }),
   ),
   mode: Schema.optional(
@@ -381,6 +381,7 @@ export const OrchestratorMcpThreadListItem = Schema.Struct({
   snoozedUntil: Schema.NullOr(IsoDateTime),
   parentThreadId: Schema.NullOr(ThreadId),
   relationshipToParent: Schema.NullOr(Schema.Literals(["fork", "subagent"])),
+  delegatedFrom: Schema.NullOr(Schema.Struct({ environmentId: EnvironmentId, threadId: ThreadId })),
   itemCount: NonNegativeInt,
   createdAt: IsoDateTime,
   updatedAt: IsoDateTime,
@@ -451,6 +452,7 @@ export const OrchestratorMcpThreadDetail = Schema.Struct({
   worktreePath: Schema.NullOr(Schema.String),
   parentThreadId: Schema.NullOr(ThreadId),
   relationshipToParent: Schema.NullOr(Schema.Literals(["fork", "subagent"])),
+  delegatedFrom: Schema.NullOr(Schema.Struct({ environmentId: EnvironmentId, threadId: ThreadId })),
   runCount: NonNegativeInt,
   itemCount: NonNegativeInt,
   pendingRequestCount: NonNegativeInt,

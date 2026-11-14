@@ -914,9 +914,9 @@ it.effect("cancels workflow members and child roots without run ids after restar
   }).pipe(Effect.provide(layer));
 });
 
-it.effect(
-  "clears persisted pendingBackgroundTasks and terminalizes stale background items on settled runs",
-  () => {
+it.effect.each([false, true])(
+  "clears persisted background work and terminalizes stale items (pending wake: %s)",
+  (pendingWake) => {
     const threadId = ThreadId.make("thread_recovery_background");
     const settledRunId = RunId.make("run_recovery_background_settled");
     const activeRunId = RunId.make("run_recovery_background_active");
@@ -972,6 +972,15 @@ it.effect(
           providerInstanceId: secondaryInstanceId,
           status: "idle",
           pendingBackgroundTasks: [],
+          pendingBackgroundTaskWakes: pendingWake
+            ? [
+                {
+                  taskId: "removed-before-notification",
+                  kind: "command",
+                  originRunId: settledRunId,
+                },
+              ]
+            : [],
         },
       ],
       providerTurns: [],
@@ -1093,10 +1102,11 @@ it.effect(
         (event) => event.type === "provider-thread.updated",
       );
 
-      assert.equal(providerThreadEvents.length, 2);
+      assert.equal(providerThreadEvents.length, pendingWake ? 3 : 2);
       for (const event of providerThreadEvents) {
         if (event.type !== "provider-thread.updated") continue;
         assert.deepEqual(event.payload.pendingBackgroundTasks ?? [], []);
+        assert.deepEqual(event.payload.pendingBackgroundTaskWakes ?? [], []);
       }
       const idleThreadEvent = providerThreadEvents.find(
         (event) =>

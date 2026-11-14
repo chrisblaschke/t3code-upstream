@@ -168,13 +168,17 @@ The extension preserves public names under `mcp__t3-code__` for saved loadouts
 and tool selectors. Modern Pi also receives hidden `mcp__t3_code__` aliases,
 which reserve the normalized namespace against configured MCP servers without
 adding declarations or search results. On Pi 0.99+,
-`orchestrator_capabilities`, `delegate_task`, and `task_status` remain directly
-available; optional tools are discovered through Pi's builtin `tool_search`.
+`orchestrator_capabilities`, `delegate_task`, `task_status`, `t3_thread_list`,
+`t3_thread_read`, `t3_thread_search`, `html_preview`, and `html_render` remain directly
+available in this fork; optional tools are discovered through Pi's builtin `tool_search`.
 On older Pi or without builtin search, all tools remain directly available.
 The bridge calls the original MCP tool name over HTTP. Follow-up requests send
 `mcp-protocol-version: 2025-06-18`; Effect's MCP transport returns 400
 without it. The first turn of a session also receives the shared T3
-orchestration instructions.
+orchestration instructions. The shared policy is unchanged from upstream. The Pi bridge
+replaces only the sentence about late-loading tools with its `mcp__t3-code__` naming,
+the eight direct tools listed above, and the instruction to load other tools with
+`tool_search`. No MCP tools are renamed on the HTTP endpoint.
 
 Pi keeps ownership of native extension discovery. T3 does not replace Pi's
 `subagent` tool or reproduce Pi's package and project-trust loader. Durable
@@ -203,6 +207,12 @@ is the authoritative list of orchestration tools. The sections below cover
 delegation and thread tools. `t3_thread_launch` is documented with them but
 registered by the project toolkit in
 [`toolkits/project/tools.ts`](../../apps/server/src/mcp/toolkits/project/tools.ts).
+
+Compared with upstream v0.1.6, this fork adds `rift` to delegated-task isolation and
+thread-launch workspace strategies. It also clarifies remote IDs, workspace ownership,
+and pending questions in the descriptions of `orchestrator_capabilities`, `delegate_task`,
+`task_status`, `t3_thread_list`, `t3_thread_read`, `t3_thread_search`, `t3_pending_request`,
+`t3_project_list`, `t3_project_read`, and `t3_thread_launch`. Tool names are unchanged.
 
 ### `orchestrator_capabilities`
 
@@ -237,7 +247,11 @@ type DelegateTaskInput = {
     providerInstanceId?: string;
     driverKind?: string;
     model?: string;
+    options?: Record<string, string | boolean>;
+    environmentId?: string;
+    projectId?: string;
   };
+  isolation?: "shared" | "worktree" | "rift";
   title?: string;
   role?: "implementation" | "research" | "review" | "design" | "test" | "general";
   mode?: "async" | "wait";
@@ -277,7 +291,9 @@ provider session. The request becomes the V2 command
 
 `mode: "async"` returns the current durable state immediately.
 `mode: "wait"` waits for the task result, including nested work and completion follow-ups, or until
-the timeout expires. A wait timeout does not cancel the child; the result sets
+the timeout expires. Completion follows the task's owned runs, descendants and
+background-result wakes, not unrelated turns started later in the same thread.
+A wait timeout does not cancel the child; the result sets
 `waitTimedOut: true`, and the caller can continue with `task_status`. A pending blocking
 question also ends the wait with `hasPendingQuestion: true` and `waitTimedOut: false`.
 If `hasPendingQuestion`, pass `threadId=childThreadId` to `t3_pending_request` with
@@ -290,7 +306,8 @@ do not end the wait.
 ```ts
 type DelegateTaskResult = {
   taskId: string;
-  childThreadId: string;
+  childThreadId: string | null;
+  remoteChild?: { environmentId: string; threadId: string; label: string };
   childRunId: string | null;
   childNodeId: string;
   status: "queued" | "running" | "waiting" | "completed" | "failed" | "cancelled" | "interrupted";
@@ -313,6 +330,24 @@ type DelegateTaskResult = {
   waitTimedOut: boolean;
 };
 ```
+
+### Linked environments
+
+`t3_environment_links` lists this server's links and reachability. Pass a link's
+`environmentId` to `orchestrator_capabilities` for its provider catalog, and pass
+`target.environmentId` plus that server's `projectId` to `delegate_task`. The target
+server owns the workspace; local uncommitted files are not copied across machines.
+Use `t3_project_list` on the target to select its project, including its Scratch project.
+
+Remote tasks return `remoteChild` instead of a local `childThreadId`. For pending
+questions, pass its `environmentId` and `threadId` to `t3_pending_request`. Cancellation
+and completion are tracked by the original parent's `taskId`.
+
+Both servers must enable `linkedEnvironmentsEnabled`; a desktop connection alone
+is not a server-to-server link. Link approvals require `access:write` on the desktop's
+active route. Re-pair an old route with the default `t3 pair` scopes if it lacks access
+management. Links expire after 30 days. Drain their tasks before replacing them:
+a new credential cannot manage threads started by the previous link.
 
 ### `task_status`
 
@@ -383,8 +418,14 @@ its own under the environment's Scratch project. For stacked PRs, use the parent
 `startFromOrigin: false`. The new thread may not run with broader runtime or
 interaction modes than the caller. As for `delegate_task`, a runtime mode the
 provider does not offer is refused, and an inherited or default one steps down
-to the broadest mode it offers. Launch has no retry key, so inspect existing threads after a failed or lost response before
-launching again. `create_threads` remains the batch option for a shared checkout.
+to the broadest mode it offers. Use `clientRequestId` to retry a failed or lost
+response without launching a duplicate. Use `worktree` for one PR per child.
+Local `rift` snapshots the project root, including uncommitted and ignored files.
+If the parent has its own worktree or Rift copy, `rift` refuses the request rather
+than copying the wrong checkout; use `shared` to work with that parent's edits.
+Ordinary worktrees lack Rift registration, so parent-checkout snapshots are not
+supported in this version. Ownership and cleanup of project-root snapshots are
+unchanged. `create_threads` remains the batch option for a shared checkout.
 
 ### `t3_thread_list`
 
@@ -396,8 +437,11 @@ bounded and offset-paginated. Deleted threads are never listed.
 ### `t3_thread_read`
 
 Reads the durable state, recent runs, and visible timeline of any thread in
-the environment by thread ID. A deleted thread returns `thread_not_found`. The
-default `messages` view returns user messages, assistant
+the environment by thread ID. With no `environmentId`, a local `thread_not_found`
+looks up the id on reachable linked environments. An explicit `environmentId`
+reads only that environment. If none has the thread, the error names the environments
+checked and any unavailable ones; it does not mean those machines contain no data.
+The default `messages` view returns user messages, assistant
 messages, and proposed plans. The `activity` view also returns summarized tool,
 reasoning, checkpoint, handoff, and runtime-request items. Large item text is
 bounded and reports whether it was truncated. `afterPosition` and

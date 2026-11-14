@@ -3,13 +3,18 @@ import {
   OrchestratorMcpEnvironmentTarget,
   OrchestratorMcpFailure,
   VcsListRefsInput,
-  VcsListRefsResult,
+  WorktreeMcpListResult,
+  ProjectId,
   WorktreeMcpHandoffInput,
   WorktreeMcpHandoffResult,
   WorktreeMcpStatusResult,
   ThreadId,
 } from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
+import * as FileSystem from "effect/FileSystem";
+import * as Path from "effect/Path";
+import * as Orchestrator from "../../../orchestration-v2/Orchestrator.ts";
+import * as VcsProcess from "../../../vcs/VcsProcess.ts";
 import * as ProjectService from "../../../project/ProjectService.ts";
 import * as ThreadManagementService from "../../../orchestration-v2/ThreadManagementService.ts";
 import { Tool, Toolkit } from "effect/ai";
@@ -60,17 +65,20 @@ const WorktreeStatusTool = Tool.make("t3_worktree_status", {
 
 const WorktreeListTool = Tool.make("t3_worktree_list", {
   description:
-    "List branch refs and checkout paths for a thread's workspace. Omit `threadId` for this thread. Detached worktrees with no branch are left out.",
+    "List branch refs and checkout paths by projectId or threadId (default: this thread). Marks the primary checkout; includeStatus adds read-only Git counts, includeOwners adds owners across all projects (no titles). Never fetches. Detached worktrees with no branch are left out.",
   parameters: Schema.Struct({
     environmentId: OrchestratorMcpEnvironmentTarget,
     threadId: Schema.optional(ThreadId),
+    projectId: Schema.optional(ProjectId),
+    includeStatus: Schema.optional(Schema.Boolean),
+    includeOwners: Schema.optional(Schema.Boolean),
     query: VcsListRefsInput.fields.query,
     cursor: VcsListRefsInput.fields.cursor,
     limit: VcsListRefsInput.fields.limit,
     refKind: VcsListRefsInput.fields.refKind,
     includeMatchingRemoteRefs: VcsListRefsInput.fields.includeMatchingRemoteRefs,
   }),
-  success: VcsListRefsResult,
+  success: WorktreeMcpListResult,
   failure: OrchestratorMcpFailure,
   failureMode: "return",
   dependencies: [
@@ -78,6 +86,10 @@ const WorktreeListTool = Tool.make("t3_worktree_list", {
     ThreadManagementService.ThreadManagementService,
     ProjectService.ProjectService,
     WorktreeMcpService.WorktreeMcpService,
+    VcsProcess.VcsProcess,
+    FileSystem.FileSystem,
+    Orchestrator.OrchestratorV2,
+    Path.Path,
   ],
 })
   .annotate(Tool.Readonly, true)

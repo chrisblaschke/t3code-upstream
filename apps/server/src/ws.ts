@@ -1,6 +1,9 @@
-import { OrchestrationDispatchCommandError } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as SecureRandom from "effect/crypto/SecureRandom";
+import {
+  OrchestrationDispatchCommandError,
+  type OpenExternalTerminalInput,
+} from "@t3tools/contracts";
 import * as Orchestrator from "./orchestration-v2/Orchestrator.ts";
 import * as PeerLinkRequests from "./peer/PeerLinkRequests.ts";
 import * as PeerLinks from "./peer/PeerLinks.ts";
@@ -665,7 +668,8 @@ const ServerWsRpcGroup = WsRpcGroup.middleware(RpcInstrumentation);
 // the group, so its type cost grows with handlers × RPCs. Near 200 methods that
 // crosses TypeScript's instantiation limit and the layer's requirements degrade to
 // `any`, so the handlers are registered as two disjoint, smaller groups.
-type ServerWsRpc = RpcGroup.Rpcs<typeof ServerWsRpcGroup>;
+const UpstreamWsRpcGroup = ServerWsRpcGroup.omit(WS_METHODS.shellOpenExternalTerminal);
+type ServerWsRpc = RpcGroup.Rpcs<typeof UpstreamWsRpcGroup>;
 const SPLIT_WS_RPC_PREFIXES = ["server", "pullRequests", "provider", "orchestration"] as const;
 type SplitWsRpc = Extract<
   ServerWsRpc,
@@ -675,9 +679,21 @@ const isSplitWsRpc = (rpc: ServerWsRpc): rpc is SplitWsRpc =>
   SPLIT_WS_RPC_PREFIXES.some((prefix) => rpc._tag.startsWith(`${prefix}.`));
 const isOtherWsRpc = (rpc: ServerWsRpc): rpc is Exclude<ServerWsRpc, SplitWsRpc> =>
   !isSplitWsRpc(rpc);
-const serverWsRpcs = Array.from(ServerWsRpcGroup.requests.values());
+const serverWsRpcs = Array.from(UpstreamWsRpcGroup.requests.values());
 const SplitWsRpcGroup = RpcGroup.make(...serverWsRpcs.filter(isSplitWsRpc));
 const OtherWsRpcGroup = RpcGroup.make(...serverWsRpcs.filter(isOtherWsRpc));
+// Fork-only RPCs get their own handler layers. One more entry in the main
+// toLayer pushes its inferred services past the compiler's instantiation
+// limit, which silently widens every server layer's requirements to any.
+export const layerPiFeatureRpc = Layer.mergeAll(
+  ServerWsRpcGroup.toLayerHandler(
+    WS_METHODS.shellOpenExternalTerminal,
+    Effect.gen(function* () {
+      const externalLauncher = yield* ExternalLauncher.ExternalLauncher;
+      return (input: OpenExternalTerminalInput) => externalLauncher.openExternalTerminal(input);
+    }),
+  ),
+);
 // Replaying each intervening event costs a shell refetch; past this gap a
 // single O(active-threads) snapshot is cheaper and bounded.
 const SHELL_RESUME_MAX_GAP = 1_000;
@@ -1794,6 +1810,7 @@ export const layerWsRpc = (
             ? directEndpoints.resolveAvailable()
             : directEndpoints.resolve(),
         });
+        const externalTerminal = yield* externalLauncher.resolveExternalTerminal();
 
         return {
           environment,
@@ -1804,6 +1821,7 @@ export const layerWsRpc = (
           issues: keybindingsConfig.issues,
           providers,
           ...discovery,
+          ...(externalTerminal === undefined ? {} : { externalTerminal }),
           observability: {
             logsDirectoryPath: config.logsDir,
             localTracingEnabled: true,
@@ -1913,7 +1931,7 @@ export const layerWsRpc = (
         return yield* mutateProjectWithClone(projectService, projectCloneTracker, mutation);
       });
 
-      const handlers = ServerWsRpcGroup.of({
+      const handlers = UpstreamWsRpcGroup.of({
         [ORCHESTRATION_V2_WS_METHODS.dispatchCommand]: (command) =>
           Effect.annotateCurrentSpan({
             "orchestration_v2.command_id": command.commandId,
@@ -2758,6 +2776,8 @@ export const layerWsRpc = (
                   title: project.title,
                   workspaceRoot: project.workspaceRoot,
                   createWorkspaceRootIfMissing: true,
+                  // git clone requires an empty destination, without a .rift marker.
+                  initializeNewWorkspaceWithRift: false,
                 })
                 .pipe(
                   Effect.asVoid,
@@ -3384,7 +3404,7 @@ export const layerWsRpc = (
         yield* OtherWsRpcGroup.toHandlers(otherHandlers),
       );
     }),
-  );
+  ).pipe(Layer.merge(layerPiFeatureRpc));
 
 // Default socket-level Defect frames end every pending client request.
 export const WS_RPC_SERVER_OPTIONS = {

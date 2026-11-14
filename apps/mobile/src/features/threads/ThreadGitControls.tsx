@@ -99,8 +99,13 @@ export type ThreadGitControlsProps = ThreadGitMenuProps & {
   readonly terminalSessions: ReadonlyArray<TerminalMenuSession>;
   readonly onOpenTerminal: (terminalId?: string | null) => void;
   readonly onOpenNewTerminal: () => void;
+  /** Present only on a Pi thread whose session file is known. */
+  readonly onOpenPiTerminal?: () => void;
   readonly onRunProjectScript: (script: ProjectScript) => Promise<void>;
 };
+
+const PI_TERMINAL_LABEL = "Open in Pi terminal";
+const PI_TERMINAL_DESCRIPTION = "Watch this Pi session live in a new terminal";
 
 function useThreadGitControlModel(props: ThreadGitMenuProps) {
   const navigation = useNavigation();
@@ -297,6 +302,18 @@ export function threadTerminalMenu(props: ThreadGitControlsProps): AppBarMenu | 
         disabled: !props.canOperateTerminal,
         onPress: props.onOpenNewTerminal,
       },
+      ...(props.onOpenPiTerminal
+        ? [
+            {
+              id: "pi-terminal",
+              title: PI_TERMINAL_LABEL,
+              subtitle: PI_TERMINAL_DESCRIPTION,
+              icon: "play",
+              disabled: !props.canOperateTerminal,
+              onPress: props.onOpenPiTerminal,
+            },
+          ]
+        : []),
     ],
   };
 }

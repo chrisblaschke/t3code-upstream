@@ -17,6 +17,7 @@ import * as DateTime from "effect/DateTime";
 
 import { resolvePendingHandoff } from "../handoff.ts";
 import type { ThreadStructure, ThreadStructureTurnItem } from "./models.ts";
+import { hasNewerThreadContextUsage } from "./composerMeters.ts";
 
 // Fallback TTL: Claude's 1h cache plus slack.
 const CLAUDE_RESUME_COMPACTION_FALLBACK_MS = 70 * 60_000;
@@ -44,13 +45,23 @@ export type ContextWindowSnapshot = NullableContextWindowUsage & {
 
 /** Newest report by timestamp; snapshots order turns by provider thread. */
 export function latestProviderTurnTokenUsage(
-  turns: ReadonlyArray<Pick<OrchestrationV2ProviderTurn, "tokenUsage">>,
+  turns: ReadonlyArray<
+    Pick<OrchestrationV2ProviderTurn, "tokenUsage"> &
+      Partial<Pick<OrchestrationV2ProviderTurn, "providerThreadId">>
+  >,
   projection?: Pick<ThreadStructure, "thread" | "contextTransfers"> | null,
-  providerThread?: Pick<OrchestrationV2ProviderThread, "contextUsage"> | null,
+  providerThread?:
+    | (Pick<OrchestrationV2ProviderThread, "contextUsage"> &
+        Partial<Pick<OrchestrationV2ProviderThread, "id">>)
+    | null,
 ): OrchestrationV2ProviderTurnTokenUsage | null {
   let latest: OrchestrationV2ProviderTurnTokenUsage | null = null;
-  for (const { tokenUsage } of turns) {
-    if (tokenUsage === undefined) continue;
+  for (const { tokenUsage, providerThreadId } of turns) {
+    if (
+      tokenUsage === undefined ||
+      (providerThread?.id !== undefined && providerThreadId !== providerThread.id)
+    )
+      continue;
     // Ties go to the later entry, since live upserts append.
     if (latest === null || Date.parse(tokenUsage.updatedAt) >= Date.parse(latest.updatedAt)) {
       latest = tokenUsage;
@@ -77,9 +88,12 @@ export function deriveLatestContextWindowSnapshot(
     readonly item: ThreadStructureTurnItem;
   }>,
   liveUsage?: OrchestrationV2ProviderTurnTokenUsage | null,
-  providerThread?: Pick<OrchestrationV2ProviderThread, "contextUsage" | "updatedAt"> | null,
+  providerThread?:
+    | (Pick<OrchestrationV2ProviderThread, "contextUsage" | "updatedAt"> &
+        Partial<Pick<OrchestrationV2ProviderThread, "id">>)
+    | null,
 ): ContextWindowSnapshot | null {
-  if (liveUsage != null) {
+  if (liveUsage != null && !hasNewerThreadContextUsage(providerThread, liveUsage)) {
     const usedTokens = Math.max(0, liveUsage.usedTokens);
     const maxTokens = liveUsage.maxTokens ?? null;
     const usedPercentage =
@@ -143,9 +157,11 @@ export function deriveLatestContextWindowSnapshot(
       compactsAutomatically: providerUsage.compactsAutomatically ?? null,
       cost: providerUsage.cost ?? null,
       autoCompactThreshold: providerUsage.autoCompactThreshold ?? null,
-      updatedAt: DateTime.formatIso(providerUsageUpdatedAt),
+      updatedAt: providerUsage.updatedAt ?? DateTime.formatIso(providerUsageUpdatedAt),
     };
   }
+  // A new session must not inherit a previous session's compaction snapshot.
+  if (providerThread?.id !== undefined) return null;
   for (let index = entries.length - 1; index >= 0; index -= 1) {
     const entry = entries[index];
     if (!entry || entry.item.type !== "compaction") {

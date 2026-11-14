@@ -263,6 +263,7 @@ describe("handoff budget", () => {
   });
 
   it("keeps measured occupancy across a model change", () => {
+    const updatedAt = "2026-10-31T20:00:00.000Z";
     const previous = {
       usedTokens: 37_321,
       maxTokens: 258_400,
@@ -270,6 +271,7 @@ describe("handoff budget", () => {
     };
     assert.isNull(
       contextUsageForHandoff({
+        updatedAt,
         sameNativeThread: false,
         sameSelection: false,
         reuseTelemetry: false,
@@ -278,6 +280,7 @@ describe("handoff budget", () => {
     );
     assert.equal(
       contextUsageForHandoff({
+        updatedAt,
         sameNativeThread: true,
         sameSelection: true,
         reuseTelemetry: true,
@@ -287,34 +290,38 @@ describe("handoff budget", () => {
     );
     assert.deepEqual(
       contextUsageForHandoff({
+        updatedAt,
         sameNativeThread: true,
         sameSelection: false,
         reuseTelemetry: true,
         previousUsage: previous,
       }),
-      { usedTokens: 37_321, maxTokens: 258_400 },
+      { usedTokens: 37_321, maxTokens: 258_400, updatedAt },
     );
     assert.deepEqual(
       contextUsageForHandoff({
+        updatedAt,
         sameNativeThread: true,
         sameSelection: false,
         reuseTelemetry: false,
         previousUsage: previous,
       }),
-      { usedTokens: 37_321, maxTokens: 258_400 },
+      { usedTokens: 37_321, maxTokens: 258_400, updatedAt },
     );
     assert.deepEqual(
       contextUsageForHandoff({
+        updatedAt,
         sameNativeThread: true,
         sameSelection: false,
         reuseTelemetry: false,
         previousUsage: { usedTokens: 30_000, maxTokens: 32_000, autoCompactThreshold: 31_000 },
         knownModelWindow: 1_000_000,
       }),
-      { usedTokens: 30_000, maxTokens: 1_000_000 },
+      { usedTokens: 30_000, maxTokens: 1_000_000, updatedAt },
     );
 
     const preserved = contextUsageForHandoff({
+      updatedAt,
       sameNativeThread: true,
       sameSelection: false,
       reuseTelemetry: false,

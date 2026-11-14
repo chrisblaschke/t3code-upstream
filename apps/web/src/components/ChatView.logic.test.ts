@@ -39,6 +39,7 @@ import type { Thread } from "../types";
 import { makeThreadFixture, makeThreadProjectionFixture } from "../test-fixtures";
 import {
   getAntigravitySendBlockReason,
+  restoreComposerCursor,
   resolveComposerProviderSelection,
   resolveWorktreeSetupProgress,
   peekRememberedThreadTimeline,
@@ -1064,6 +1065,31 @@ describe("snapshotComposerSend", () => {
   });
 });
 
+describe("provider editor cursor restoration", () => {
+  it("waits for the controlled value and does not focus after switching threads", () => {
+    let nextFrame: FrameRequestCallback | undefined;
+    vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
+      nextFrame = callback;
+      return 1;
+    });
+    try {
+      const editor = { resetCursorState: vi.fn(), focusAtEnd: vi.fn() };
+      let current = true;
+      restoreComposerCursor({ current: editor }, "prefill", () => current);
+      expect(editor.resetCursorState).toHaveBeenCalledWith({ prompt: "prefill", cursor: 7 });
+      expect(editor.focusAtEnd).not.toHaveBeenCalled();
+      current = false;
+      nextFrame?.(0);
+      expect(editor.focusAtEnd).not.toHaveBeenCalled();
+      restoreComposerCursor({ current: editor }, "prefill", () => true);
+      nextFrame?.(0);
+      expect(editor.focusAtEnd).toHaveBeenCalledOnce();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+});
+
 describe("planComposerTurn", () => {
   const base = {
     messageText: "hello",
@@ -1085,6 +1111,22 @@ describe("planComposerTurn", () => {
       missingWorktreeBaseBranch: false,
       baseBranchForWorktree: "main",
       shouldQueueBehindActiveRun: false,
+    });
+  });
+
+  it("snapshots Rift from the checkout without requiring a Git base branch", () => {
+    expect(
+      planComposerTurn({ ...base, sendEnvMode: "rift", activeThreadBranch: null }),
+    ).toMatchObject({
+      missingWorktreeBaseBranch: false,
+      baseBranchForWorktree: "HEAD",
+      workspaceKind: "rift",
+    });
+    expect(
+      planComposerTurn({ ...base, sendEnvMode: "rift", worktreePath: "/snapshots/task" }),
+    ).toMatchObject({
+      baseBranchForWorktree: null,
+      workspaceKind: undefined,
     });
   });
 

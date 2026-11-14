@@ -468,6 +468,133 @@ it.layer(layerTest)("delegated completion delivery repairs", (it) => {
       }),
   );
 
+  it.effect(
+    "a sibling that finishes during its cohort's running wake turn is offered right away",
+    () =>
+      Effect.gen(function* () {
+        const orchestrator = yield* Orchestrator.OrchestratorV2;
+        const sink = yield* EventSink.EventSinkV2;
+        const now = yield* DateTime.now;
+        const threadId = ThreadId.make("sibling-wake-parent");
+        const projectId = ProjectId.make("sibling-wake-project");
+        const originRunId = RunId.make("sibling-wake-origin");
+        const rootNodeId = NodeId.make("sibling-wake-origin-root");
+        const firstTaskId = NodeId.make("sibling-wake-first");
+        // Two helpers from one finished turn share a cohort; the first one's wake is reserved.
+        yield* seedParentWithTerminalTask({
+          threadId,
+          projectId,
+          runId: originRunId,
+          rootNodeId,
+          taskId: firstTaskId,
+          deliveryState: "claimed",
+          deliveryTaskIds: [firstTaskId],
+          completionWake: "always",
+          parentRunStatus: "completed",
+          now,
+        });
+        const sibling = yield* seedRestartCancelledChild({
+          parentThreadId: threadId,
+          projectId,
+          parentRunId: originRunId,
+          rootNodeId,
+          name: "sibling-wake-second",
+          completionWake: "always",
+          continuationPending: false,
+          runStatus: "running",
+          now,
+        });
+
+        // The first helper's wake starts its own turn, and that turn is running.
+        const origin = (yield* orchestrator.getThreadProjection(threadId)).runs.find(
+          (run) => run.id === originRunId,
+        )!;
+        const delivery = origin.delegatedCompletion!.delivery!;
+        yield* orchestrator.dispatch({
+          type: "message.dispatch",
+          createdBy: "agent",
+          creationSource: "server",
+          commandId: CommandId.make("sibling-wake-start"),
+          threadId,
+          messageId: delivery.messageId,
+          text: "Delegated task completed",
+          attachments: [],
+          modelSelection,
+          dispatchMode: { type: "queue_after_active" },
+          delegatedCompletion: {
+            parentRunId: originRunId,
+            generation: delivery.generation,
+            taskIds: delivery.taskIds,
+          },
+        });
+        yield* orchestrator.resumeQueuedRuns;
+        const wake = (yield* orchestrator.getThreadProjection(threadId)).runs.find(
+          (run) => run.userMessageId === delivery.messageId,
+        )!;
+        yield* sink.write({
+          events: [
+            {
+              ...runEvent({
+                threadId,
+                runId: wake.id,
+                ordinal: wake.ordinal,
+                status: "running",
+                now,
+              }),
+              payload: { ...wake, status: "running", startedAt: now },
+            },
+          ],
+        });
+
+        // The sibling finishes while that wake turn is still running.
+        const afterSequence = yield* sink.latestSequence();
+        yield* sink.write({
+          events: [
+            runEvent({
+              threadId: sibling.childThreadId,
+              runId: sibling.childRunId,
+              ordinal: 1,
+              status: "completed",
+              now,
+            }),
+          ],
+        });
+        yield* sink.stream({ afterSequence, eventType: "subagent.updated" }).pipe(
+          Stream.filter(
+            (stored) =>
+              stored.event.type === "subagent.updated" &&
+              stored.event.payload.id === sibling.taskId &&
+              stored.event.payload.status === "completed",
+          ),
+          Stream.take(1),
+          Stream.runDrain,
+        );
+        // A no-op command on the parent waits for the completion handler to release its lock.
+        yield* orchestrator.dispatch({
+          type: "notification.delivery.accept",
+          commandId: CommandId.make("sibling-wake-barrier"),
+          threadId,
+          messageId: MessageId.make("sibling-wake-no-such-message"),
+        });
+
+        const after = yield* orchestrator.getThreadProjection(threadId);
+        const cohort = after.runs.find((run) => run.id === originRunId)?.delegatedCompletion;
+        assert.equal(after.runs.find((run) => run.id === wake.id)?.status, "running");
+        // The running wake turn already carries the first result to the provider.
+        assert.equal(
+          after.subagents.find((task) => task.id === firstTaskId)?.completionDelivery?.state,
+          "delivered",
+        );
+        // The sibling gets its own delivery now instead of waiting for that turn to end.
+        assert.equal(
+          after.subagents.find((task) => task.id === sibling.taskId)?.completionDelivery?.state,
+          "claimed",
+        );
+        assert.equal(cohort?.delivery?.generation, 2);
+        assert.deepEqual(cohort?.delivery?.taskIds, [sibling.taskId]);
+      }),
+  );
+
   it.effect("acceptance batches pending siblings without acknowledging their results", () =>
     Effect.gen(function* () {
       const orchestrator = yield* Orchestrator.OrchestratorV2;
@@ -1337,7 +1464,7 @@ const seedRestartCancelledChild = (input: {
   readonly name: string;
   readonly completionWake: "always" | "settled_only";
   readonly continuationPending: boolean;
-  readonly runStatus?: "cancelled" | "completed";
+  readonly runStatus?: "cancelled" | "completed" | "running";
   readonly lostWork?: OrchestrationV2Run["restartCancelledBackgroundWork"];
   readonly now: DateTime.Utc;
 }) =>

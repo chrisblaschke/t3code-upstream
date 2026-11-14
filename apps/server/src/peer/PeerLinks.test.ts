@@ -204,6 +204,9 @@ it.effect("links with a pairing code, and the peer holds its agents to the limit
       // A refusal keeps the peer's reason.
       const notFound = yield* probe(a, undefined, "refuse").pipe(Effect.flip);
       expect(notFound).toMatchObject({ code: "thread_not_found", message: "No such thread." });
+      const [afterRefusal] = yield* a.links.list;
+      expect(afterRefusal?.status).toBe("reachable");
+      expect(afterRefusal?.lastError).toBeNull();
     }),
   ).pipe(Effect.provide(NodeHttpServer.layerTest)),
 );

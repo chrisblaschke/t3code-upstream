@@ -3,7 +3,9 @@ import {
   CommandId,
   EnvironmentId,
   MessageId,
+  NodeId,
   type OrchestrationV2Command,
+  type OrchestrationV2ServerCommand,
   type OrchestrationV2Run,
   type OrchestrationV2ProviderThread,
   ProviderThreadId,
@@ -288,7 +290,13 @@ it.effect("waitForThread can wait past an ended run for the thread's delegated w
       }) as unknown as OrchestrationV2Run;
     // The run ended, but a task it delegated still runs and will wake the thread.
     let runs = [run(runId, 1, "completed", 1)];
-    let subagents = [{ status: "running" }];
+    let subagents: OrchestrationV2ThreadProjection["subagents"] = [
+      {
+        id: NodeId.make("task:wait-delegated"),
+        runId,
+        status: "running",
+      } as OrchestrationV2ThreadProjection["subagents"][number],
+    ];
     const stored = (sequence: number, event: object) =>
       ({ sequence, event: { threadId, ...event } }) as unknown as OrchestrationV2StoredEvent;
     const layerTest = ThreadManagementService.layer.pipe(
@@ -344,8 +352,8 @@ it.effect("waitForThread can wait past an ended run for the thread's delegated w
     // A wait that returns early fails below instead of hanging here.
     yield* Effect.raceFirst(Deferred.await(subscribed), Fiber.await(fiber));
     // The task finishes; its delivery wakes the thread, whose next run answers.
-    subagents = [{ status: "completed" }];
-    runs = [...runs, run(wakeRunId, 2, "completed", 3)];
+    subagents = [{ ...subagents[0]!, status: "completed" }];
+    runs = [...runs, { ...run(wakeRunId, 2, "completed", 3), workStartedAt: runs[0]!.startedAt! }];
     yield* Queue.offer(events, stored(1, { type: "subagent.updated", payload: {} }));
     const result = yield* Fiber.join(fiber);
 
@@ -411,6 +419,604 @@ it.effect("waitForThread settles delegated work on a thread rolled back past its
       run: { id: runId, status: "rolled_back" },
       resultRun: { id: runId, status: "rolled_back" },
     });
+  }),
+);
+
+const waitOwnershipProjectId = ProjectId.make("project:wait-ownership");
+const waitOwnershipThreadId = ThreadId.make("thread:wait-ownership");
+const ownershipRun = (
+  id: string,
+  ordinal: number,
+  extra: Partial<OrchestrationV2Run> = {},
+): OrchestrationV2Run =>
+  ({
+    id: RunId.make(id),
+    userMessageId: MessageId.make(`message:${id}`),
+    ordinal,
+    status: "completed",
+    startedAt: DateTime.makeUnsafe(ordinal * 1_000),
+    completedAt: DateTime.makeUnsafe((ordinal + 1) * 1_000),
+    ...extra,
+  }) as OrchestrationV2Run;
+
+const waitOwnershipLayer = (mock: Partial<Orchestrator.OrchestratorV2["Service"]>) =>
+  ThreadManagementService.layer.pipe(
+    Layer.provide(Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({})),
+    Layer.provide(
+      Layer.mock(Orchestrator.OrchestratorV2)({
+        getThreadEventSequence: () => Effect.succeed(0),
+        restartContinuationPending: () => Effect.succeed(false),
+        delegatedTaskResultPending: () => Effect.succeed(false),
+        ...mock,
+      }),
+    ),
+    Layer.provide(ServerSettings.layerTest()),
+    Layer.provide(layerReceiptsTest),
+  );
+
+const ownershipRecords = (
+  runs: ReadonlyArray<OrchestrationV2Run>,
+  extra: {
+    messages?: ReadonlyArray<Partial<OrchestrationV2ThreadProjection["messages"][number]>>;
+    subagents?: ReadonlyArray<Partial<OrchestrationV2ThreadProjection["subagents"][number]>>;
+    providerThreads?: ReadonlyArray<Partial<OrchestrationV2ProviderThread>>;
+  } = {},
+) =>
+  ({
+    thread: { id: waitOwnershipThreadId, projectId: waitOwnershipProjectId, deletedAt: null },
+    runs,
+    subagents: [],
+    providerThreads: [],
+    ...extra,
+    messages: (extra.messages ?? []).map((message) => ({ role: "user", ...message })),
+  }) as unknown as OrchestrationV2ThreadProjection;
+
+const waitForOwnedRecords = (records: OrchestrationV2ThreadProjection) =>
+  Effect.gen(function* () {
+    const service = yield* ThreadManagementService.ThreadManagementService.pipe(
+      Effect.provide(
+        waitOwnershipLayer({
+          getThreadRecords: (_threadId, fields, filter) =>
+            Effect.succeed({
+              ...records,
+              messages: fields.some((field) => field === "messages")
+                ? records.messages.filter(
+                    (message) =>
+                      (filter?.messageRoles === undefined ||
+                        filter.messageRoles.includes(message.role)) &&
+                      (filter?.monitorNotificationsOnly !== true ||
+                        message.notification?.source.kind === "monitor"),
+                  )
+                : [],
+            }),
+          // An unrelated cut must not block the selected task either.
+          restartContinuationPending: (run) => Effect.succeed(run.status === "interrupted"),
+          // The old unscoped second gate must not be consulted.
+          delegatedTaskResultPending: () => Effect.die("thread-wide completion check"),
+          streamStoredEventsFrom: () => Stream.never,
+        }),
+      ),
+    );
+    const fiber = yield* service
+      .waitForThread({
+        projectId: waitOwnershipProjectId,
+        threadId: waitOwnershipThreadId,
+        runId: records.runs[0]!.id,
+        untilDelegatedWorkSettled: true,
+        timeoutMs: 1_000,
+      })
+      .pipe(Effect.forkChild);
+    yield* TestClock.adjust(Duration.millis(1_000));
+    return yield* Fiber.join(fiber);
+  });
+
+it.effect.each(["running", "queued", "interrupted", "completed"] as const)(
+  "delegated wait ignores an unrelated %s run and its children",
+  (status) =>
+    Effect.gen(function* () {
+      const selected = ownershipRun("run:owned", 1);
+      const unrelated = ownershipRun("run:unrelated", 2, {
+        status,
+        userMessageId: MessageId.make("message:background"),
+        ...(status === "queued" ? { startedAt: null } : { workStartedAt: selected.completedAt! }),
+      });
+      const records = ownershipRecords([selected, unrelated], {
+        messages: [
+          {
+            id: unrelated.userMessageId,
+            runId: unrelated.id,
+            notification: {
+              originRunIds: [unrelated.id],
+              source: { kind: "background_task" },
+              outcome: "completed",
+              summary: "Other work",
+            },
+          },
+        ],
+        subagents: [{ id: NodeId.make("task:unrelated"), runId: unrelated.id, status: "running" }],
+      });
+      const result = yield* waitForOwnedRecords(records);
+      expect(result.timedOut).toBe(false);
+      expect(result.resultRun?.id).toBe(selected.id);
+    }),
+);
+
+it.effect.each(["later-run", "owned", "legacy"] as const)(
+  "opaque background work retains its launching run: %s",
+  (owner) =>
+    Effect.gen(function* () {
+      const providerThreadId = ProviderThreadId.make("provider:reused");
+      const selected = ownershipRun("run:opaque-a", 1, { providerThreadId });
+      const later = ownershipRun("run:opaque-b", 2, { providerThreadId });
+      const result = yield* waitForOwnedRecords(
+        ownershipRecords([selected, later], {
+          providerThreads: [
+            {
+              id: providerThreadId,
+              pendingBackgroundTasks: [
+                {
+                  taskId: "opaque-task",
+                  kind: "background_task",
+                  ...(owner === "legacy"
+                    ? {}
+                    : { originRunId: owner === "owned" ? selected.id : later.id }),
+                },
+              ],
+            },
+          ],
+        }),
+      );
+      expect(result.timedOut).toBe(owner !== "later-run");
+      if (!result.timedOut) expect(result.resultRun?.id).toBe(selected.id);
+    }),
+);
+
+it.effect("owned opaque work waits through an interleaved wake and returns its answer", () =>
+  Effect.gen(function* () {
+    const selected = ownershipRun("run:opaque-a", 1);
+    const later = ownershipRun("run:opaque-b", 2);
+    const wake = ownershipRun("run:opaque-wake", 3, { status: "queued", startedAt: null });
+    const message = {
+      id: wake.userMessageId,
+      runId: wake.id,
+      notification: {
+        originRunIds: [selected.id],
+        source: { kind: "background_task" as const },
+        outcome: "completed" as const,
+        summary: "Opaque work finished",
+      },
+    };
+    const queued = yield* waitForOwnedRecords(
+      ownershipRecords([selected, later, wake], { messages: [message] }),
+    );
+    expect(queued.timedOut).toBe(true);
+    const completed = yield* waitForOwnedRecords(
+      ownershipRecords(
+        [selected, later, { ...wake, status: "completed", startedAt: later.completedAt }],
+        { messages: [message] },
+      ),
+    );
+    expect(completed.timedOut).toBe(false);
+    expect(completed.resultRun?.id).toBe(wake.id);
+  }),
+);
+
+it.effect("a child completion queued before its run still belongs to A, not interleaved B", () =>
+  Effect.gen(function* () {
+    const taskId = NodeId.make("task:queued-for-a");
+    const messageId = MessageId.make("message:queued-for-a");
+    const selected = ownershipRun("run:parent-a", 1, {
+      delegatedCompletion: {
+        disposition: "open",
+        nextGeneration: 2,
+        delivery: { generation: 1, messageId, taskIds: [taskId] },
+      },
+    });
+    const later = ownershipRun("run:parent-b", 2);
+    const records = ownershipRecords([selected, later], {
+      subagents: [
+        {
+          id: taskId,
+          runId: selected.id,
+          status: "completed",
+          completionDelivery: { state: "acknowledged", observedByRunId: null },
+        },
+      ],
+      messages: [
+        {
+          id: messageId,
+          runId: null,
+          delegatedCompletion: { parentRunId: selected.id, generation: 1, taskIds: [taskId] },
+        },
+      ],
+    });
+    expect((yield* waitForOwnedRecords(records)).timedOut).toBe(true);
+    const otherWait = yield* waitForOwnedRecords({ ...records, runs: [later, selected] });
+    expect(otherWait.timedOut).toBe(false);
+    expect(otherWait.resultRun?.id).toBe(later.id);
+  }),
+);
+
+it.effect.each(["running", "pending-delivery", "nested"] as const)(
+  "delegated wait retains owned descendant work: %s",
+  (scenario) =>
+    Effect.gen(function* () {
+      const selected = ownershipRun("run:owned", 1);
+      const taskId = NodeId.make("task:owned-child");
+      const records = ownershipRecords([selected], {
+        subagents: [
+          {
+            id: taskId,
+            runId: selected.id,
+            status: scenario === "running" ? "running" : "completed",
+            ...(scenario === "pending-delivery"
+              ? { completionDelivery: { state: "pending", observedByRunId: null } }
+              : {}),
+          },
+          ...(scenario === "nested"
+            ? [
+                {
+                  id: NodeId.make("task:nested"),
+                  runId: RunId.make("run:native-child"),
+                  parentNodeId: taskId,
+                  status: "running",
+                } as const,
+              ]
+            : []),
+        ],
+      });
+      expect((yield* waitForOwnedRecords(records)).timedOut).toBe(true);
+    }),
+);
+
+it.effect.each(["completed", "queued", "restart", "new-descendant"] as const)(
+  "delegated wait follows its task notification across unrelated work: %s",
+  (scenario) =>
+    Effect.gen(function* () {
+      const selected = ownershipRun("run:owned", 1);
+      const unrelated = ownershipRun("run:unrelated", 2, { status: "running" });
+      const taskId = NodeId.make("task:owned-child");
+      const wake = ownershipRun("run:owned-wake", 3, {
+        userMessageId: MessageId.make("message:owned-wake"),
+        workStartedAt: unrelated.startedAt!,
+        ...(scenario === "queued" ? { status: "queued", startedAt: null } : {}),
+      });
+      const continuation = ownershipRun("run:owned-restart", 4, {
+        status: "running",
+        restartContinuationOfRunId: wake.id,
+      });
+      const records = ownershipRecords(
+        [selected, unrelated, wake, ...(scenario === "restart" ? [continuation] : [])],
+        {
+          messages: [
+            {
+              id: wake.userMessageId,
+              runId: wake.id,
+              notification: {
+                source: { kind: "delegated_task", taskIds: [taskId] },
+                outcome: "completed",
+                summary: "Child done",
+              },
+            },
+          ],
+          subagents: [
+            // Reverse dependency order exercises the ownership fixed point.
+            ...(scenario === "new-descendant"
+              ? [{ id: NodeId.make("task:from-wake"), runId: wake.id, status: "running" } as const]
+              : []),
+            { id: taskId, runId: selected.id, status: "completed" },
+          ],
+        },
+      );
+      const result = yield* waitForOwnedRecords(records);
+      expect(result.timedOut).toBe(scenario !== "completed");
+      if (scenario === "completed") expect(result.resultRun?.id).toBe(wake.id);
+    }),
+);
+
+it.effect.each([
+  "owned",
+  "unrelated-provider",
+  "unrelated-native",
+  "opaque-shared",
+  "unawaited",
+] as const)("delegated wait scopes provider background work: %s", (scenario) =>
+  Effect.gen(function* () {
+    const providerThreadId = ProviderThreadId.make("provider:owned");
+    const otherProviderThreadId = ProviderThreadId.make("provider:other");
+    const providerInstanceId = ProviderInstanceId.make("claude");
+    const selected = ownershipRun("run:owned", 1, { providerThreadId });
+    const unrelated = ownershipRun("run:unrelated", 2, {
+      providerThreadId:
+        scenario === "unrelated-provider" ? otherProviderThreadId : providerThreadId,
+      status: "running",
+    });
+    const background = {
+      kind: "command" as const,
+      taskId: "native:command",
+      ...(scenario === "unawaited" ? {} : { awaited: true as const }),
+    };
+    const records = ownershipRecords([selected, unrelated], {
+      providerThreads: [
+        {
+          id: scenario === "unrelated-provider" ? otherProviderThreadId : providerThreadId,
+          providerInstanceId,
+          pendingBackgroundTasks: [background],
+        },
+      ],
+      subagents:
+        scenario === "opaque-shared"
+          ? []
+          : [
+              {
+                id: NodeId.make("task:native"),
+                runId:
+                  scenario === "owned" || scenario === "unawaited" ? selected.id : unrelated.id,
+                providerInstanceId,
+                nativeTaskRef: {
+                  driver: ProviderDriverKind.make("claude"),
+                  nativeId: background.taskId,
+                  strength: "strong",
+                },
+                status: "completed",
+              },
+            ],
+    });
+    const result = yield* waitForOwnedRecords(records);
+    expect(result.timedOut).toBe(scenario === "owned" || scenario === "opaque-shared");
+    if (!result.timedOut) expect(result.resultRun?.id).toBe(selected.id);
+  }),
+);
+
+it.effect("an unrelated task notification does not inherit timestamp ownership", () =>
+  Effect.gen(function* () {
+    const selected = ownershipRun("run:owned", 1);
+    const wake = ownershipRun("run:other-task-wake", 2, {
+      status: "queued",
+      userMessageId: MessageId.make("message:other-wake"),
+      workStartedAt: selected.startedAt!,
+    });
+    const records = ownershipRecords([selected, wake], {
+      messages: [
+        {
+          id: wake.userMessageId,
+          runId: wake.id,
+          notification: {
+            source: { kind: "delegated_task", taskIds: [NodeId.make("task:other")] },
+            outcome: "completed",
+            summary: "Other task done",
+          },
+        },
+      ],
+    });
+    const result = yield* waitForOwnedRecords(records);
+    expect(result.timedOut).toBe(false);
+    expect(result.resultRun?.id).toBe(selected.id);
+  }),
+);
+
+it.effect.each([
+  "untagged",
+  "task",
+  "wake",
+  "same-time-wake",
+  "restart",
+  "rolled_back",
+  "unrelated-wake",
+] as const)("delegated wait preserves ownership: %s", (scenario) =>
+  Effect.gen(function* () {
+    const taskId = NodeId.make("task:owned");
+    const selected = ownershipRun("run:owned", 1, {
+      ...(scenario === "untagged" || scenario === "unrelated-wake" || scenario === "same-time-wake"
+        ? {}
+        : { delegatedTaskId: taskId }),
+      ...(scenario === "rolled_back" ? { status: "rolled_back", startedAt: null } : {}),
+    });
+    const ownedLater = ownershipRun("run:owned-later", 2, {
+      ...(scenario === "wake" || scenario === "same-time-wake"
+        ? { workStartedAt: selected.startedAt! }
+        : {}),
+      ...(scenario === "same-time-wake" ? { startedAt: selected.startedAt } : {}),
+      ...(scenario === "restart" ? { restartContinuationOfRunId: selected.id } : {}),
+    });
+    const unrelated = ownershipRun("run:unrelated", 3, {
+      delegatedTaskId: NodeId.make("task:unrelated"),
+    });
+    const runs =
+      scenario === "rolled_back"
+        ? [selected]
+        : scenario === "unrelated-wake"
+          ? [
+              selected,
+              {
+                ...unrelated,
+                ordinal: 2,
+                startedAt: selected.startedAt,
+                delegatedTaskId: undefined,
+              },
+              ownershipRun("run:unrelated-wake", 3, {
+                startedAt: selected.startedAt,
+                workStartedAt: selected.startedAt!,
+              }),
+            ]
+          : [selected, ownedLater, unrelated];
+    const wakeRun = scenario === "unrelated-wake" ? runs[2]! : ownedLater;
+    const records = ownershipRecords(runs, {
+      messages: ["wake", "same-time-wake", "unrelated-wake"].includes(scenario)
+        ? [
+            {
+              id: wakeRun.userMessageId,
+              runId: wakeRun.id,
+              notification: {
+                originRunIds: [scenario === "unrelated-wake" ? unrelated.id : selected.id],
+                source: { kind: "background_task" },
+                outcome: "completed",
+                summary: "Background work completed",
+              },
+            },
+          ]
+        : [],
+    });
+    const layer = waitOwnershipLayer({
+      getThreadRecords: () => Effect.succeed(records),
+    });
+    const service = yield* ThreadManagementService.ThreadManagementService.pipe(
+      Effect.provide(layer),
+    );
+    const result = yield* service.waitForThread({
+      projectId: waitOwnershipProjectId,
+      threadId: waitOwnershipThreadId,
+      runId: selected.id,
+      timeoutMs: 60 * 60 * 1_000,
+      untilDelegatedWorkSettled: true,
+    });
+    expect(result.timedOut).toBe(false);
+    expect(result.resultRun?.id).toBe(
+      scenario === "wake" || scenario === "same-time-wake" || scenario === "restart"
+        ? ownedLater.id
+        : selected.id,
+    );
+  }),
+);
+
+it.effect.each(["cancelled", "failed"] as const)(
+  "delegated wait settles a follow-up that %s before starting",
+  (status) =>
+    Effect.gen(function* () {
+      const previous = ownershipRun("run:previous", 1);
+      const selected = ownershipRun("run:never-started", 2, { status, startedAt: null });
+      const service = yield* ThreadManagementService.ThreadManagementService.pipe(
+        Effect.provide(
+          waitOwnershipLayer({
+            getThreadRecords: () => Effect.succeed(ownershipRecords([previous, selected])),
+          }),
+        ),
+      );
+      const result = yield* service.waitForThread({
+        projectId: waitOwnershipProjectId,
+        threadId: waitOwnershipThreadId,
+        runId: selected.id,
+        timeoutMs: 60 * 60 * 1_000,
+        untilDelegatedWorkSettled: true,
+      });
+      expect(result).toMatchObject({
+        timedOut: false,
+        run: { id: selected.id, status },
+        resultRun: { id: selected.id, status },
+      });
+    }),
+);
+
+it.effect("delegated wait subscribes to a later answer's restart decline without an event", () =>
+  Effect.gen(function* () {
+    const selected = ownershipRun("run:selected", 1);
+    const wake = ownershipRun("run:wake", 2, {
+      status: "running",
+      completedAt: null,
+      workStartedAt: selected.startedAt!,
+    });
+    let runs = [selected, wake];
+    let pending = false;
+    const subscribed = yield* Deferred.make<void>();
+    const awaitingDecline = yield* Queue.unbounded<RunId>();
+    let activeWaiters = 0;
+    const declined = yield* Deferred.make<void>();
+    const events = yield* Queue.unbounded<OrchestrationV2StoredEvent>();
+    const layer = waitOwnershipLayer({
+      getThreadRecords: () => Effect.sync(() => ownershipRecords(runs)),
+      restartContinuationPending: (run) => Effect.succeed(pending && run.id === wake.id),
+      awaitRestartContinuation: (run) =>
+        Effect.gen(function* () {
+          activeWaiters++;
+          yield* Queue.offer(awaitingDecline, run.id);
+          yield* Deferred.await(declined);
+        }).pipe(Effect.ensuring(Effect.sync(() => activeWaiters--))),
+      streamStoredEventsFrom: (input) =>
+        input?.eventType === "run.updated"
+          ? Stream.fromEffect(Deferred.succeed(subscribed, undefined)).pipe(
+              Stream.drain,
+              Stream.concat(Stream.fromQueue(events)),
+            )
+          : Stream.never,
+    });
+    const service = yield* ThreadManagementService.ThreadManagementService.pipe(
+      Effect.provide(layer),
+    );
+    const fiber = yield* service
+      .waitForThread({
+        projectId: waitOwnershipProjectId,
+        threadId: waitOwnershipThreadId,
+        runId: selected.id,
+        timeoutMs: 60 * 60 * 1_000,
+        untilDelegatedWorkSettled: true,
+      })
+      .pipe(Effect.forkChild);
+    yield* Deferred.await(subscribed);
+    pending = true;
+    runs = [selected, { ...wake, status: "cancelled", completedAt: DateTime.makeUnsafe(4_000) }];
+    yield* Queue.offer(events, {
+      sequence: 1,
+      event: { threadId: waitOwnershipThreadId, type: "run.updated", payload: runs[1] },
+    } as unknown as OrchestrationV2StoredEvent);
+    expect(yield* Queue.take(awaitingDecline)).toBe(wake.id);
+    for (const sequence of [2, 3]) {
+      yield* Queue.offer(events, {
+        sequence,
+        event: { threadId: waitOwnershipThreadId, type: "run.updated", payload: runs[1] },
+      } as unknown as OrchestrationV2StoredEvent);
+      expect(yield* Queue.take(awaitingDecline)).toBe(wake.id);
+      expect(activeWaiters).toBe(1);
+    }
+    pending = false;
+    yield* Deferred.succeed(declined, undefined);
+    const result = yield* Fiber.join(fiber);
+    expect(result).toMatchObject({
+      timedOut: false,
+      resultRun: { id: wake.id, status: "cancelled" },
+    });
+  }),
+);
+
+it.effect("stopDelegatedTasks records a remote stop even after its task has finished", () =>
+  Effect.gen(function* () {
+    const taskId = NodeId.make("task:remote-finished");
+    const commands: Array<OrchestrationV2ServerCommand> = [];
+    const layer = waitOwnershipLayer({
+      getThreadRecords: () =>
+        Effect.succeed({
+          ...ownershipRecords([]),
+          subagents: [
+            {
+              id: taskId,
+              origin: "app_owned",
+              childThreadId: null,
+              status: "completed",
+              result: "Original answer",
+              remoteChild: { environmentId: EnvironmentId.make("environment:remote") },
+            },
+          ],
+        } as unknown as OrchestrationV2ThreadProjection),
+      dispatch: (command) =>
+        Effect.sync(() => {
+          commands.push(command);
+          return { sequence: 1, storedEvents: [] } as never;
+        }),
+    });
+    const service = yield* ThreadManagementService.ThreadManagementService.pipe(
+      Effect.provide(layer),
+    );
+    yield* service.stopDelegatedTasks({
+      threadId: waitOwnershipThreadId,
+      commandId: CommandId.make("command:stop-finished"),
+    });
+    expect(commands).toEqual([
+      {
+        type: "delegated_task.remote.stop",
+        commandId: CommandId.make(`command:stop-finished:stop:${taskId}`),
+        parentThreadId: waitOwnershipThreadId,
+        taskId,
+      },
+    ]);
   }),
 );
 

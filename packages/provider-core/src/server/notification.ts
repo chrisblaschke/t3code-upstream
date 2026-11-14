@@ -4,12 +4,14 @@ import type {
   OrchestrationV2NotificationSource,
   OrchestrationV2Subagent,
   OrchestrationV2TurnItem,
+  RunId,
   ThreadId,
 } from "@t3tools/contracts";
 
 type NotificationOutcome = OrchestrationV2Notification["outcome"];
 
 export type BackgroundWork = {
+  readonly originRunId?: RunId | undefined;
   readonly label?: string | undefined;
 } & (
   | { readonly kind: "subagent"; readonly childThreadId?: ThreadId | undefined }
@@ -139,6 +141,9 @@ export function backgroundWorkNotification(
   if (first === undefined) return null;
   const outcome = combinedOutcome(reports.map((report) => report.outcome));
   return {
+    ...(reports.every((report) => report.originRunId !== undefined)
+      ? { originRunIds: [...new Set(reports.map((report) => report.originRunId!))] }
+      : {}),
     source: reportsSource([first, ...rest]),
     outcome,
     summary: reportsSummary([first, ...rest], outcome),

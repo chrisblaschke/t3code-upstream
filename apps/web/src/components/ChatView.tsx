@@ -33,7 +33,7 @@ import { ThreadFind, ThreadFindCanvas } from "./chat/ThreadFindProvider";
 import { closeThreadFind, openThreadFind, useThreadFindOpen } from "./chat/threadFindStore";
 import { THREAD_FIND_BAR_RESERVED_HEIGHT } from "./chat/ThreadFindBar";
 import { usageLimitRecoveryBannerItem } from "./chat/UsageLimitRecoveryBanner";
-import { resolveDraftHeroState } from "./ChatView.logic";
+import { resolveDraftHeroState, restoreComposerCursor } from "./ChatView.logic";
 import { useQueuedRunEdit } from "./chat/useQueuedRunEdit";
 import { recallCheckoutIsRepo, rememberCheckoutIsRepo } from "./ChatView.logic";
 import { useLogicalProjectEnvironments } from "../hooks/useLogicalProjectEnvironments";
@@ -78,6 +78,7 @@ import {
   deriveProviderExtensionStatuses,
   deriveReportedModelSelection,
   deriveResumableRunId,
+  deriveActiveProviderThreadNativeMetadata,
   formatModelSelectionEffort,
   deriveRunlessWorkStartedAt,
   deriveThreadActivityRun,
@@ -259,7 +260,8 @@ import {
   useQuietThreadShell,
   useThreadCheckpointSummaries,
 } from "../state/entities";
-import { useEnvironmentShellHasSnapshot } from "../state/shell";
+import { useEnvironmentShellHasSnapshot, shellEnvironment } from "../state/shell";
+import { resolvePiTuiLaunch } from "@t3tools/client-runtime/state/pi-tui";
 import { ChatComposer, type ChatComposerHandle } from "./chat/ChatComposer";
 import { DraftHeroHeadline } from "./chat/DraftHeroHeadline";
 import { ExpandedImageDialogHost, openExpandedImagePreview } from "./chat/ExpandedImageDialog";
@@ -508,6 +510,9 @@ export default function ChatView(props: ChatViewProps) {
     composerRef,
   });
   const composerDraftTarget = queuedRunEdit.draftTarget;
+  const activeProviderNativeMetadata = serverProjection
+    ? deriveActiveProviderThreadNativeMetadata(serverProjection)
+    : null;
   const reportedModelSelection = serverProjection
     ? deriveReportedModelSelection(serverProjection)
     : null;
@@ -1712,6 +1717,32 @@ export default function ChatView(props: ChatViewProps) {
   // Provider-native subagents cannot take messages; approvals and questions go to the top-level parent.
   const showProviderSubagentBar = isProviderSubagent;
   const composerMounted = !showProviderSubagentBar;
+  const editorText = activeProviderNativeMetadata?.editorText;
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- consumes a provider editor command once and restores the editor after its controlled value commits
+  useEffect(() => {
+    if (!composerMounted || editorText === undefined) return;
+    const key = scopedThreadKey(routeThreadRef);
+    let focusFrame: number | undefined;
+    const frame = requestAnimationFrame(() => {
+      if (!composerRef.current || currentRouteThreadKeyRef.current !== key) return;
+      if (
+        !useComposerDraftStore
+          .getState()
+          .applyEditorText(composerDraftTarget, editorText, routeThreadRef)
+      )
+        return;
+      promptRef.current = editorText.text;
+      focusFrame = restoreComposerCursor(
+        composerRef,
+        editorText.text,
+        () => currentRouteThreadKeyRef.current === key,
+      );
+    });
+    return () => {
+      cancelAnimationFrame(frame);
+      if (focusFrame !== undefined) cancelAnimationFrame(focusFrame);
+    };
+  }, [composerMounted, editorText, routeThreadRef, composerDraftTarget, composerRef, promptRef]);
   const providerSubagentModels = selectedProviderEntry?.models ?? EMPTY_PROVIDER_MODELS;
   // Providers can report dated model ids or aliases.
   const providerSubagentModelSlug = selectedProviderEntry
@@ -1863,7 +1894,8 @@ export default function ChatView(props: ChatViewProps) {
         message: { messageId: newMessageId(), role: "user", text, attachments: [] },
         runtimeMode,
         interactionMode: DEFAULT_INTERACTION_MODE,
-        dispatchMode: "queue",
+        // A page's reply answers the running turn, so it steers; with nothing running it starts one.
+        dispatchMode: "steer",
       },
     });
     if (result._tag === "Failure") {
@@ -2671,6 +2703,9 @@ export default function ChatView(props: ChatViewProps) {
     previewOpen: previewPanelOpen,
     editableFocus: isEditableFocused(eventTarget),
     modelPickerOpen: composerRef.current?.isModelPickerOpen() ?? false,
+    composerMenuOpen:
+      (composerRef.current?.isComposerMenuOpen() ?? false) ||
+      (composerRef.current?.isModelPickerOpen() ?? false),
     composerFocus:
       document.activeElement?.getAttribute("data-testid") === "composer-editor" &&
       isInSideChatPane(document.activeElement) === embedded,
@@ -2681,6 +2716,50 @@ export default function ChatView(props: ChatViewProps) {
     isDesktop: isElectron,
   });
   const getShortcutContextStable = useStableCallback(getShortcutContext);
+  const canOpenExternalTerminal = useAtomValue(
+    shellEnvironment.openExternalTerminal.permissionAtom(environmentId),
+  );
+  const openExternalTerminal = useAtomCommand(
+    shellEnvironment.openExternalTerminal,
+    "open Pi terminal",
+  );
+  const piTuiLaunch = resolvePiTuiLaunch(
+    serverProjection,
+    serverConfig?.settings.providerInstances,
+  );
+  const useHostTerminal =
+    isElectron && environmentId === hostEnvironmentId && serverConfig?.externalTerminal === "kitty";
+  const canOpenPiTerminal = canOperateTerminal && (!useHostTerminal || canOpenExternalTerminal);
+  const openPiTerminal = useStableCallback(async () => {
+    if (!canOpenPiTerminal || !piTuiLaunch || !activeProject || !activeThread) return;
+    const cwd = gitCwd ?? activeProject.workspaceRoot;
+    if (!cwd) return;
+    if (useHostTerminal) {
+      const result = await openExternalTerminal({
+        environmentId,
+        input: { cwd, command: [...piTuiLaunch.argv], title: `pi · ${activeThread.title}` },
+      });
+      if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
+        const error = squashAtomCommandFailure(result);
+        toastManager.add({
+          type: "error",
+          title: "Could not open Pi terminal",
+          description: error instanceof Error ? error.message : "Opening the terminal failed.",
+        });
+      }
+      return;
+    }
+    await runProjectScriptStable(
+      {
+        id: "pi-tui",
+        name: "Pi TUI",
+        command: piTuiLaunch.shellCommand,
+        icon: "play",
+        runOnWorktreeCreate: false,
+      },
+      { preferNewTerminal: true, rememberAsLastInvoked: false },
+    );
+  });
   const timelineSkills = activeProviderStatus
     ? resolveProviderSkillsForCwd(activeProviderStatus, gitCwd)
     : EMPTY_PROVIDER_SKILLS;
@@ -3070,8 +3149,14 @@ export default function ChatView(props: ChatViewProps) {
   };
   const onExpandTimelineImageStable = useStableCallback(onExpandTimelineImage);
   const shownThreadSyncPhase = activeEnvironmentUnavailable ? null : delayedThreadSyncPhase;
+  const providerStatusLines =
+    activeProviderNativeMetadata?.statusLines?.filter(({ text }) => text.trim()) ?? [];
   const hasThreadNow =
-    attentionNow !== null || workNow !== null || goalNow !== null || shownThreadSyncPhase !== null;
+    providerStatusLines.length > 0 ||
+    attentionNow !== null ||
+    workNow !== null ||
+    goalNow !== null ||
+    shownThreadSyncPhase !== null;
   const queuedRunCount = serverProjection ? getUserQueuedThreadRuns(serverProjection).length : 0;
   // The queue control is mounted for every server thread but joins the footer only while it shows
   // something, by its own rule: an optimistic message stops counting once the server has it.
@@ -3111,6 +3196,7 @@ export default function ChatView(props: ChatViewProps) {
           work={workNow}
           syncPhase={shownThreadSyncPhase}
           goal={goalNow}
+          providerStatusLines={providerStatusLines}
         />
         {threadStatusLine}
         {pendingGuestMessageCount > 0 && isServerThread && activeThread ? (
@@ -3321,6 +3407,9 @@ export default function ChatView(props: ChatViewProps) {
               activeThreadTitle={activeThread.title}
               activeThreadLinkOrigin={activeThreadShell?.linkOrigin?.label ?? null}
               activeProject={activeProject ?? null}
+              {...(piTuiLaunch && canOpenPiTerminal
+                ? { onOpenPiTerminal: () => void openPiTerminal() }
+                : {})}
               parentThreadLink={headerParentThreadLink}
               onOpenThread={onOpenRelatedThreadStable}
               rightPanelOpen={inlineRightPanelOwnsTitleBar}
@@ -3897,6 +3986,7 @@ export default function ChatView(props: ChatViewProps) {
                     providers: providerStatuses,
                     sources: serverConfig?.usageLimitSources ?? EMPTY_USAGE_LIMIT_SOURCES,
                     contextWindow: activeContextWindow,
+                    model: activeThread?.modelSelection?.model,
                   }}
                 />
 

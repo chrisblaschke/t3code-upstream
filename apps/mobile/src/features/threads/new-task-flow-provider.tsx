@@ -104,7 +104,7 @@ import {
 import { useEnvironmentShellReadiness } from "../../state/shell";
 import { useConnectionsReady, useWorkspaceEnvironments } from "../../state/workspace";
 
-type WorkspaceMode = "local" | "worktree";
+type WorkspaceMode = "local" | "worktree" | "rift";
 
 export function branchBadgeLabel(input: {
   readonly branch: VcsRef;
@@ -626,8 +626,8 @@ export function NewTaskFlowProvider(
     updateComposerDraftSettings(selectedProjectDraftKey, {
       workspaceSelection: {
         mode,
-        branch: mode === "local" ? localSelection.branch : selectedBranchName,
-        worktreePath: mode === "local" ? localSelection.worktreePath : selectedWorktreePath,
+        branch: mode === "local" || mode === "rift" ? localSelection.branch : selectedBranchName,
+        worktreePath: mode === "local" ? localSelection.worktreePath : null,
         ...(draftStartFromOrigin !== undefined ? { startFromOrigin: draftStartFromOrigin } : {}),
         // Refs have not named the current branch yet; the selection follows it.
         ...(mode === "local" && localSelection.awaitsCurrentBranch
@@ -746,7 +746,7 @@ export function NewTaskFlowProvider(
           selectedBranch: workspaceSelection?.branch ?? null,
           currentCheckoutBranch: options?.currentCheckoutBranch ?? null,
         }),
-        worktreePath: mode === "worktree" ? null : (workspaceSelection?.worktreePath ?? null),
+        worktreePath: mode !== "local" ? null : (workspaceSelection?.worktreePath ?? null),
         ...((workspaceSelection?.startFromOrigin ?? startFromOrigin)
           ? { startFromOrigin: true }
           : {}),

@@ -78,6 +78,7 @@ export function assertClaudeBackgroundTaskWakeOutput(
     .find((task) => task.taskId === BACKGROUND_TASK_ID);
   assert.deepEqual(rosterTask, {
     taskId: BACKGROUND_TASK_ID,
+    originRunId: rootRun?.id,
     description: "Background sleep test",
     kind: "command",
   });

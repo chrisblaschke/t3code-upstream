@@ -24,14 +24,22 @@ import {
   type ServerConfig as T3ServerConfig,
   type UsageLimitsReport,
 } from "@t3tools/contracts";
+import { isUsageLimitsCommand } from "@t3tools/shared/usageLimits";
 import {
-  collectProviderUsageLimits,
-  hasProviderUsageLimits,
-  isUsageLimitsCommand,
-} from "@t3tools/shared/usageLimits";
+  collectThreadUsageLimits,
+  hasThreadUsageLimits,
+} from "@t3tools/client-runtime/state/thread-usage-limits";
 import { StackActions, useFocusEffect, useNavigation } from "@react-navigation/native";
 import type { ReactNode } from "react";
-import { useEffect, useEffectEvent, useRef, useState, type RefObject } from "react";
+import { minuteTick } from "@t3tools/client-runtime/clock";
+import {
+  useEffect,
+  useEffectEvent,
+  useRef,
+  useState,
+  useSyncExternalStore,
+  type RefObject,
+} from "react";
 import { I18nManager, Keyboard, Platform, View, type ViewStyle } from "react-native";
 import { composerImageGallery } from "../../lib/composerImageGallery";
 import { filePreviewGallery } from "../../lib/filePreviewGallery";
@@ -100,6 +108,7 @@ import {
 import { compactEditorInsets } from "./compactEditorInsets";
 import { ComposerCommandPopover } from "./ComposerCommandPopover";
 import { ComposerPopoverAnchor } from "./ComposerPopoverAnchor";
+import { ComposerMeters } from "./ComposerMeters";
 import { ComposerQueuedEditAttachments } from "./ComposerQueuedEdit";
 import { useComposerCommandMenu } from "./use-composer-command-menu";
 import type { ComposerEnvironmentCandidate } from "@t3tools/client-runtime/composerThreadItems";
@@ -518,18 +527,20 @@ export const ThreadComposer = function ThreadComposer(props: ThreadComposerProps
   const { onSendMessage, onChangeDraftMessage, onShowUsageLimits } = props;
   const usageLimitsOffered =
     selectedProviderStatus !== null &&
-    hasProviderUsageLimits(
+    hasThreadUsageLimits(
       selectedProviderStatus.driver,
       props.serverConfig?.providers ?? [],
       props.serverConfig?.usageLimitSources ?? [],
     );
+  const quotaMinute = useSyncExternalStore(minuteTick.subscribe, minuteTick.getSnapshot);
+  const usageLimits = collectThreadUsageLimits(
+    currentModelSelection.instanceId,
+    props.serverConfig?.providers ?? [],
+    props.serverConfig?.usageLimitSources ?? [],
+    Date.parse(`${quotaMinute}:00Z`),
+  );
   const openUsageLimits = () => {
-    const report = collectProviderUsageLimits(
-      currentModelSelection.instanceId,
-      props.serverConfig?.providers ?? [],
-      props.serverConfig?.usageLimitSources ?? [],
-      Date.now(),
-    );
+    const report = usageLimits;
     onShowUsageLimits(report);
     if (!report) {
       Dialog.alert("Usage limits unavailable", "This provider does not currently report limits.");
@@ -1092,6 +1103,14 @@ export const ThreadComposer = function ThreadComposer(props: ThreadComposerProps
                   compactEditor.isExpanded ? { flex: 1, justifyContent: "flex-end" } : undefined
                 }
               >
+                <ComposerMeters
+                  environmentId={props.environmentId}
+                  threadId={props.selectedThread.id}
+                  model={currentModelSelection.model}
+                  driver={selectedProviderStatus?.driver}
+                  usageLimits={usageLimits}
+                  onPress={usageLimitsOffered ? () => openUsageLimits() : undefined}
+                />
                 {modelControl}
                 <ComposerDictationStartAction
                   size={usesLargeControls ? "large" : "regular"}

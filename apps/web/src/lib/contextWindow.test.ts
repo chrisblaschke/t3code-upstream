@@ -7,6 +7,7 @@ import {
   ContextTransferId,
   ProviderDriverKind,
   ProviderInstanceId,
+  ProviderThreadId,
   RunId,
   ThreadId,
 } from "@t3tools/contracts";
@@ -70,6 +71,74 @@ describe("live provider-turn usage (#8144)", () => {
     expect(formatContextWindowCompactionMessage(snapshot?.autoCompactThreshold)).toBe(
       "Compacts automatically at about 150,000 tokens.",
     );
+  });
+});
+
+describe("active provider session context", () => {
+  const id = ProviderThreadId.make("active");
+  const priorId = ProviderThreadId.make("previous");
+  it("excludes newer reports from another provider session", () => {
+    const usage = latestProviderTurnTokenUsage(
+      [
+        { providerThreadId: id, tokenUsage: { usedTokens: 12, updatedAt: "2026-10-29T01:00:00Z" } },
+        {
+          providerThreadId: priorId,
+          tokenUsage: { usedTokens: 99, updatedAt: "2026-10-29T02:00:00Z" },
+        },
+      ],
+      null,
+      { id, contextUsage: null },
+    );
+    expect(usage?.usedTokens).toBe(12);
+  });
+
+  it("ignores a status-only thread update after a fresh turn report", () => {
+    const result = deriveLatestContextWindowSnapshot(
+      [],
+      { usedTokens: 90, maxTokens: 100, updatedAt: "2026-10-29T02:00:00Z" },
+      {
+        id,
+        contextUsage: { usedTokens: 12, maxTokens: 100, updatedAt: "2026-10-29T01:00:00Z" },
+        updatedAt: DateTime.makeUnsafe("2026-10-29T03:00:00Z"),
+      } as never,
+    );
+    expect(result?.usedTokens).toBe(90);
+  });
+
+  it("uses a newer compaction snapshot instead of the pre-compaction turn", () => {
+    const result = deriveLatestContextWindowSnapshot(
+      [],
+      {
+        usedTokens: 150_000,
+        updatedAt: "2026-10-29T01:00:00Z",
+      },
+      {
+        id,
+        contextUsage: { usedTokens: 20_000, maxTokens: 200_000, updatedAt: "2026-10-29T02:00:00Z" },
+        updatedAt: DateTime.makeUnsafe("2026-10-29T02:00:00Z"),
+      },
+    );
+    expect(result?.usedTokens).toBe(20_000);
+  });
+
+  it("does not reuse a previous session's transcript meter", () => {
+    const entries = [
+      {
+        item: {
+          type: "compaction" as const,
+          afterTokenCount: 15_000,
+          beforeTokenCount: 100_000,
+          updatedAt: DateTime.makeUnsafe("2026-10-29T01:00:00Z"),
+        } as Parameters<typeof deriveLatestContextWindowSnapshot>[0][number]["item"],
+      },
+    ];
+    expect(
+      deriveLatestContextWindowSnapshot(entries, null, {
+        id,
+        contextUsage: null,
+        updatedAt: DateTime.makeUnsafe("2026-10-29T02:00:00Z"),
+      }),
+    ).toBeNull();
   });
 });
 

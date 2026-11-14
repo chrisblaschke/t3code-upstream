@@ -10,12 +10,15 @@ import {
   type UsageLimitSourceSnapshot,
 } from "@t3tools/contracts";
 import { resolveServerBackgroundActivitySettings } from "@t3tools/shared/backgroundActivitySettings";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Equal from "effect/Equal";
+import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as Path from "effect/Path";
 import * as PubSub from "effect/PubSub";
 import * as Ref from "effect/Ref";
 import * as Semaphore from "effect/Semaphore";
@@ -27,6 +30,7 @@ import * as SecretResolverLayer from "../secrets/SecretResolver.ts";
 import { resolveSettingsSecrets } from "../secrets/settingsSecretValue.ts";
 import * as Settings from "../serverSettings.ts";
 import { makeCliproxyApi } from "./cliproxyApi.ts";
+import { decodePiUsageCache, piUsageLimitsError, piUsageLimitsSnapshot } from "./piUsageLimits.ts";
 
 export class UsageLimitSources extends Context.Service<
   UsageLimitSources,
@@ -69,6 +73,11 @@ export const make = Effect.gen(function* () {
     return settingsSecretLiteral(resolved.managementKey);
   });
   const stateRef = yield* Ref.make<ReadonlyArray<UsageLimitSourceSnapshot>>([]);
+  const fileSystem = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  // The extension writes under the home directory regardless of PI_CODING_AGENT_DIR.
+  const piCacheDir = path.join(yield* HostProcess.HomeDirectory, ".pi", "agent", "cache");
+  const piCacheFile = path.join(piCacheDir, "usage-limits.json");
   const changes = yield* Effect.acquireRelease(
     PubSub.unbounded<ReadonlyArray<UsageLimitSourceSnapshot>>(),
     PubSub.shutdown,
@@ -94,6 +103,21 @@ export const make = Effect.gen(function* () {
     return { ...base, accounts: accounts.success };
   });
 
+  // Absent file: no row. A read that fails keeps the last good row, since the
+  // extension may be mid-write; only a file never read shows the error.
+  const readPiSource = Effect.gen(function* () {
+    const exists = yield* fileSystem.exists(piCacheFile).pipe(Effect.orElseSucceed(() => false));
+    if (!exists) return [];
+    const checkedAt = DateTime.formatIso(yield* DateTime.now);
+    const cache = yield* fileSystem
+      .readFileString(piCacheFile)
+      .pipe(Effect.flatMap(decodePiUsageCache), Effect.result);
+    if (cache._tag === "Success") return [piUsageLimitsSnapshot(cache.success, checkedAt)];
+    yield* Effect.logDebug("pi usage cache read failed", { cause: cache.failure });
+    const previous = (yield* Ref.get(stateRef)).find((source) => source.kind === "pi");
+    return [previous ?? piUsageLimitsError(checkedAt, "Could not read Pi's usage cache.")];
+  });
+
   const publish = Effect.fn("UsageLimitSources.publish")(function* (
     next: ReadonlyArray<UsageLimitSourceSnapshot>,
   ) {
@@ -117,7 +141,15 @@ export const make = Effect.gen(function* () {
       ([id, config]) => readSource(id as UsageLimitSourceId, config),
       { concurrency: 4 },
     );
-    yield* publish(snapshots);
+    const pi = yield* readPiSource;
+    yield* publish([...snapshots, ...pi]);
+  }).pipe(refreshLock.withPermits(1), Effect.ignoreCause({ log: true }));
+
+  // A cache change re-reads only the Pi row; hubs stay on their own cadence.
+  const refreshPi = Effect.gen(function* () {
+    const pi = yield* readPiSource;
+    const previous = yield* Ref.get(stateRef);
+    yield* publish([...previous.filter((source) => source.kind !== "pi"), ...pi]);
   }).pipe(refreshLock.withPermits(1), Effect.ignoreCause({ log: true }));
 
   // Shares the refresh lock so a stale in-flight read cannot overwrite a redemption.
@@ -174,6 +206,16 @@ export const make = Effect.gen(function* () {
       Effect.ignoreCause({ log: true }),
     ),
   ).pipe(Effect.forkScoped);
+
+  // Every Pi process rewrites the cache; debounce the burst and re-read. The
+  // directory may not exist yet, in which case the interval still covers it.
+  yield* fileSystem.watch(piCacheDir).pipe(
+    Stream.filter((event) => path.basename(event.path) === path.basename(piCacheFile)),
+    Stream.debounce("250 millis"),
+    Stream.runForEach(() => refreshPi),
+    Effect.catchCause((cause) => Effect.logDebug("pi usage cache watcher stopped", { cause })),
+    Effect.forkScoped,
+  );
 
   yield* refresh.pipe(Effect.forkScoped);
 

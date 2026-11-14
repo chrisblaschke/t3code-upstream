@@ -66,6 +66,7 @@ export function latestNativeContextUsage(
 
 /** Native occupancy survives selection changes; the previous model window and compaction threshold do not. */
 export function contextUsageForHandoff(input: {
+  readonly updatedAt: string;
   readonly sameNativeThread: boolean;
   readonly sameSelection: boolean;
   readonly reuseTelemetry: boolean;
@@ -81,6 +82,7 @@ export function contextUsageForHandoff(input: {
   const maxTokens = input.reuseTelemetry ? reportedMax : (input.knownModelWindow ?? reportedMax);
   return {
     usedTokens: input.previousUsage.usedTokens,
+    updatedAt: input.updatedAt,
     ...(maxTokens === undefined ? {} : { maxTokens }),
   };
 }

@@ -88,6 +88,7 @@ export function useMultipleModelSend(input: MultipleModelSendInput) {
     threadId,
     project,
     branch,
+    workspaceKind,
     selections,
     targets,
     sendSnapshot,
@@ -101,6 +102,7 @@ export function useMultipleModelSend(input: MultipleModelSendInput) {
     readonly threadId: ThreadId;
     readonly project: EnvironmentProject;
     readonly branch: string;
+    readonly workspaceKind?: "rift" | undefined;
     readonly selections: ReadonlyArray<ModelSelection>;
     readonly targets: ReadonlyArray<MultipleModelTarget>;
     readonly sendSnapshot: ComposerSendSnapshot;
@@ -190,6 +192,7 @@ export function useMultipleModelSend(input: MultipleModelSendInput) {
                     prepareWorktree: {
                       projectCwd: project.workspaceRoot,
                       baseBranch: branch,
+                      ...(workspaceKind ? { workspaceKind } : {}),
                       requireWorktree: true,
                       ...(startFromOrigin ? { startFromOrigin: true } : {}),
                     },
@@ -213,6 +216,15 @@ export function useMultipleModelSend(input: MultipleModelSendInput) {
       resetLocalDispatch();
       releasedComposer = true;
       await starts;
+      // A fan-out is one send, not a mode: left on, the next prompt in this composer
+      // silently starts one thread per model again.
+      if (
+        failedSelections.length === 0 &&
+        isCurrentSend() &&
+        appAtomRegistry.get(fanoutSelectionsAtom) === submittedSelections
+      ) {
+        appAtomRegistry.set(fanoutSelectionsAtom, null);
+      }
       if (startedCount > 0) {
         toastManager.add(
           stackedThreadToast({

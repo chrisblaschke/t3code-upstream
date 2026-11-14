@@ -152,6 +152,7 @@ export const VcsListRefsInput = Schema.Struct({
 export type VcsListRefsInput = typeof VcsListRefsInput.Type;
 
 export const VcsCreateWorktreeInput = Schema.Struct({
+  workspaceKind: Schema.optional(Schema.Literal("rift")),
   cwd: TrimmedNonEmptyStringSchema,
   refName: TrimmedNonEmptyStringSchema,
   newRefName: Schema.optional(TrimmedNonEmptyStringSchema),
@@ -282,6 +283,7 @@ export type VcsStatusStreamEvent = typeof VcsStatusStreamEvent.Type;
 
 export const VcsListRefsResult = Schema.Struct({
   isAtRepositoryRoot: Schema.optional(Schema.Boolean),
+  riftUsable: Schema.optional(Schema.Boolean),
   refs: Schema.Array(VcsRef),
   isRepo: Schema.Boolean,
   hasPrimaryRemote: Schema.Boolean,

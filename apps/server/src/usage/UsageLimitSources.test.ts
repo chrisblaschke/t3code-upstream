@@ -1,7 +1,9 @@
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
+import * as NodeServices from "@effect/platform-node/NodeServices";
 import { expect, it } from "@effect/vitest";
 import { SecretProviderId, ServerConfigStreamEvent, UsageLimitSourceId } from "@t3tools/contracts";
 import * as SecretResolver from "@t3tools/secret-provider-core/server/SecretResolver";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
@@ -86,7 +88,10 @@ it.effect("keeps malformed source URLs encodable for config subscribers", () =>
         HttpClient.make(() => Effect.die("Unexpected network request")),
       ),
       NodeCrypto.layer,
+      NodeServices.layer,
     ]),
+    // No Pi usage cache under this home, so only the configured hubs are listed.
+    Effect.provideService(HostProcess.HomeDirectory, "/nonexistent-t3-test-home"),
     Effect.scoped,
   ),
 );
@@ -153,7 +158,9 @@ it.effect("reads a management key from its secret provider", () => {
         ),
       ),
       NodeCrypto.layer,
+      NodeServices.layer,
     ]),
+    Effect.provideService(HostProcess.HomeDirectory, "/nonexistent-t3-test-home"),
     Effect.scoped,
   );
 });

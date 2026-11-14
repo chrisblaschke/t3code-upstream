@@ -1,6 +1,7 @@
 import * as SecretResolver from "@t3tools/secret-provider-core/server/SecretResolver";
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import { assert, it } from "@effect/vitest";
 import {
   AuthOrchestrationOperateScope,
@@ -873,7 +874,13 @@ const layerConfigSources = Layer.mergeAll(
       ServerConfigModule.layerTest(process.cwd(), { prefix: "t3-config-subscription-test-" }),
     ),
   ),
-  Layer.provideMerge(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)),
+  Layer.provideMerge(
+    Layer.mergeAll(
+      NodeCrypto.layer,
+      NodeServices.layer,
+      Layer.succeed(HostProcess.Environment, {}),
+    ),
+  ),
 );
 
 it.effect.each([
@@ -922,6 +929,7 @@ it.effect.each([
               Effect.as([]),
             ),
           resolveFileManagerRevealKind: () => Effect.undefined,
+          resolveExternalTerminal: () => Effect.undefined,
         }),
         Layer.mock(ProviderRegistry.ProviderRegistry)({
           getProviders: Effect.succeed([]),
@@ -1175,6 +1183,7 @@ it.effect("on-demand clients get provider config without workspace snapshots", (
       Layer.mock(ExternalLauncher.ExternalLauncher)({
         resolveAvailableEditors: () => Effect.succeed([]),
         resolveFileManagerRevealKind: () => Effect.undefined,
+        resolveExternalTerminal: () => Effect.undefined,
       }),
       Layer.mock(ProviderRegistry.ProviderRegistry)({
         getProviders: Effect.succeed([provider]),

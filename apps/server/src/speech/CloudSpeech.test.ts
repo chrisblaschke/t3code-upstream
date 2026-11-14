@@ -1,4 +1,9 @@
 import { it } from "@effect/vitest";
+import * as NodeServices from "@effect/platform-node/NodeServices";
+import * as HostProcess from "@t3tools/shared/HostProcess";
+import { makeLocalFileTracer, makeTraceSink } from "@t3tools/shared/observability";
+import * as FileSystem from "effect/FileSystem";
+import * as Path from "effect/Path";
 import { DEFAULT_SPEECH_TRANSCRIPTION_OPTIONS, SecretProviderId } from "@t3tools/contracts";
 import * as SecretResolver from "@t3tools/secret-provider-core/server/SecretResolver";
 import * as Effect from "effect/Effect";
@@ -9,6 +14,157 @@ import * as FetchHttpClient from "effect/http/FetchHttpClient";
 import { expect, vi } from "vite-plus/test";
 import * as ServerSettings from "../serverSettings.ts";
 import * as CloudSpeech from "./CloudSpeech.ts";
+import * as GrokLogin from "./grokLogin.ts";
+
+it.effect("rejects malformed Grok login tokens without putting them in traces", () =>
+  Effect.gen(function* () {
+    const token = "SYNTHETIC_GROK_TOKEN\nINVALID";
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const home = yield* fs.makeTempDirectoryScoped();
+    yield* fs.makeDirectory(path.join(home, ".grok"));
+    yield* fs.writeFileString(
+      path.join(home, ".grok", "auth.json"),
+      JSON.stringify({
+        "https://auth.x.ai::fixture": {
+          auth_mode: "oidc",
+          key: token,
+          expires_at: "2099-01-01T00:00:00Z",
+        },
+      }),
+    );
+    const tracePath = path.join(home, "trace.ndjson");
+    const options = {
+      filePath: tracePath,
+      maxBytes: 1024 * 1024,
+      maxFiles: 2,
+      batchWindowMs: 10000,
+    };
+    const sink = yield* makeTraceSink(options);
+    const tracer = yield* makeLocalFileTracer({ ...options, sink });
+    const service = yield* CloudSpeech.CloudSpeech.pipe(
+      Effect.provide(
+        CloudSpeech.layer.pipe(
+          Layer.provide(FetchHttpClient.layer),
+          Layer.provide(ServerSettings.ServerSettingsService.layerTest()),
+          Layer.provide(Layer.mock(SecretResolver.SecretResolver)({})),
+        ),
+      ),
+      Effect.provideService(HostProcess.HomeDirectory, home),
+    );
+    // Real header validation, without any network I/O.
+    const validateOnly: typeof fetch = async (input, init) => {
+      throw new Error(
+        `Unexpected valid ${new Request(input, init).method} request; network disabled`,
+      );
+    };
+    const failure = yield* service
+      .transcribe("xai", new Uint8Array(4), DEFAULT_SPEECH_TRANSCRIPTION_OPTIONS)
+      .pipe(
+        Effect.provideService(FetchHttpClient.Fetch, validateOnly),
+        Effect.withTracer(tracer),
+        Effect.flip,
+      );
+    yield* sink.close();
+    expect(yield* fs.readFileString(tracePath)).not.toContain("SYNTHETIC_GROK_TOKEN");
+    expect(JSON.stringify(failure)).not.toContain("SYNTHETIC_GROK_TOKEN");
+    expect(failure).toMatchObject({ reason: "missing-key" });
+    expect((yield* service.configured).xai).toBe(false);
+  }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+);
+
+it.effect.each([undefined, "saved-key"])(
+  "uses a Grok CLI login unless a stored key wins (%s)",
+  (storedKey) =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const home = yield* fs.makeTempDirectoryScoped();
+      yield* fs.makeDirectory(path.join(home, ".grok"));
+      // OIDC token size is not bounded by the API-key setting's 4096-character limit.
+      const token = `eyJhbGciOiJSUzI1NiJ9.${"a".repeat(5000)}.signature`;
+      yield* fs.writeFileString(
+        path.join(home, ".grok", "auth.json"),
+        JSON.stringify({
+          "https://auth.x.ai::fixture": {
+            auth_mode: "oidc",
+            key: token,
+            expires_at: "2099-01-01T00:00:00Z",
+          },
+        }),
+      );
+      const service = yield* CloudSpeech.CloudSpeech.pipe(
+        Effect.provide(
+          CloudSpeech.layer.pipe(
+            Layer.provide(FetchHttpClient.layer),
+            Layer.provide(ServerSettings.ServerSettingsService.layerTest()),
+            Layer.provide(Layer.mock(SecretResolver.SecretResolver)({})),
+          ),
+        ),
+        Effect.provideService(HostProcess.HomeDirectory, home),
+      );
+      if (storedKey) yield* service.setKey("xai", Redacted.make(storedKey));
+      const upstream = vi.fn<typeof fetch>(async () => Response.json({ text: "from Grok" }));
+      const transcribe = () =>
+        service
+          .transcribe("xai", new Uint8Array(4), DEFAULT_SPEECH_TRANSCRIPTION_OPTIONS)
+          .pipe(Effect.provideService(FetchHttpClient.Fetch, upstream));
+      expect(yield* transcribe()).toBe("from Grok");
+      expect(yield* service.configured).toEqual({ openai: false, xai: true, openrouter: false });
+      expect(String(upstream.mock.calls[0]?.[0])).toBe("https://api.x.ai/v1/stt");
+      expect(new Headers(upstream.mock.calls[0]?.[1]?.headers).get("authorization")).toBe(
+        `Bearer ${storedKey ?? token}`,
+      );
+      yield* service.setKey("xai", null);
+      yield* fs.writeFileString(path.join(home, ".grok", "auth.json"), "{partial");
+      expect((yield* service.configured).xai).toBe(false);
+      expect(yield* Effect.flip(transcribe())).toMatchObject({
+        provider: "xai",
+        reason: "missing-key",
+      });
+      expect(upstream).toHaveBeenCalledTimes(1);
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+);
+
+it.effect("does not upload with a Grok login if a stored key arrives during resolution", () =>
+  Effect.gen(function* () {
+    const started = Promise.withResolvers<void>();
+    const auth = Promise.withResolvers<unknown>();
+    using _read = vi.spyOn(GrokLogin, "readGrokAuth").mockImplementation(() => {
+      started.resolve();
+      return auth.promise;
+    });
+    const service = yield* CloudSpeech.CloudSpeech.pipe(
+      Effect.provide(
+        CloudSpeech.layer.pipe(
+          Layer.provide(FetchHttpClient.layer),
+          Layer.provide(ServerSettings.ServerSettingsService.layerTest()),
+          Layer.provide(Layer.mock(SecretResolver.SecretResolver)({})),
+        ),
+      ),
+    );
+    const upstream = vi.fn<typeof fetch>(async () => Response.json({ text: "unexpected" }));
+    const job = yield* service
+      .transcribe("xai", new Uint8Array(4), DEFAULT_SPEECH_TRANSCRIPTION_OPTIONS)
+      .pipe(Effect.provideService(FetchHttpClient.Fetch, upstream), Effect.flip, Effect.forkChild);
+    expect(
+      yield* Effect.raceFirst(
+        Effect.promise(() => started.promise).pipe(Effect.as("started")),
+        Fiber.join(job).pipe(Effect.as("finished")),
+      ),
+    ).toBe("started");
+    yield* service.setKey("xai", Redacted.make("new-key"));
+    auth.resolve({
+      "https://auth.x.ai::fixture": {
+        auth_mode: "oidc",
+        key: "login-token",
+        expires_at: "2099-01-01T00:00:00Z",
+      },
+    });
+    expect(yield* Fiber.join(job)).toMatchObject({ reason: "key-changed" });
+    expect(upstream).not.toHaveBeenCalled();
+  }),
+);
 
 it.effect.each(["openai", "xai"] as const)("sends only to %s using its own saved key", (provider) =>
   Effect.gen(function* () {
@@ -93,7 +249,7 @@ it.effect.each(["openai", "xai"] as const)("sends only to %s using its own saved
       reason: "unreadable-key",
     });
     expect(upstream).toHaveBeenCalledTimes(3);
-  }),
+  }).pipe(Effect.provideService(HostProcess.HomeDirectory, "/nonexistent-cloud-speech-test-home")),
 );
 
 it.effect("uploads to OpenRouter only for a listed exact model, as zero-retention JSON WAV", () =>

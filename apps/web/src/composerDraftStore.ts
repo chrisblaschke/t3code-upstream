@@ -112,7 +112,7 @@ const isPreviewAnnotationPayload = Schema.is(PreviewAnnotationPayloadSchema);
 
 export const COMPOSER_DRAFT_STORAGE_KEY = "t3code:composer-drafts:v1";
 const COMPOSER_DRAFT_STORAGE_VERSION = 9;
-const DraftThreadEnvModeSchema = Schema.Literals(["local", "worktree"]);
+const DraftThreadEnvModeSchema = Schema.Literals(["local", "worktree", "rift"]);
 export type DraftThreadEnvMode = typeof DraftThreadEnvModeSchema.Type;
 
 export const DraftId = Schema.String.pipe(Schema.brand("DraftId"));
@@ -240,6 +240,7 @@ const PersistedTerminalContextDraft = Schema.Struct({
 type PersistedTerminalContextDraft = typeof PersistedTerminalContextDraft.Type;
 
 const PersistedComposerThreadDraftState = Schema.Struct({
+  consumedEditorTextAt: Schema.optionalKey(Schema.String),
   prompt: Schema.String,
   attachments: Schema.Array(PersistedComposerImageAttachment),
   files: Schema.optionalKey(Schema.Array(PersistedComposerDraftFileAttachment)),
@@ -365,6 +366,7 @@ export type ComposerContextInsertionHandler = (
 const contextInsertionHandlers = new Map<string, ComposerContextInsertionHandler>();
 
 export interface ComposerThreadDraftState {
+  consumedEditorTextAt?: string;
   prompt: string;
   images: ComposerImageAttachment[];
   files: ComposerFileAttachment[];
@@ -535,6 +537,11 @@ interface ComposerDraftStoreState {
   clearDraftThread: (threadRef: ComposerThreadTarget) => void;
   setStickyModelSelection: (modelSelection: ModelSelection | null | undefined) => void;
   setPrompt: (threadRef: ComposerThreadTarget, prompt: string) => void;
+  applyEditorText: (
+    draftTarget: ComposerThreadTarget,
+    editorText: { text: string; at: string },
+    consumptionThreadRef?: ScopedThreadRef,
+  ) => boolean;
   setTerminalContexts: (threadRef: ComposerThreadTarget, contexts: TerminalContextDraft[]) => void;
   setModelSelection: (
     threadRef: ComposerThreadTarget,
@@ -898,6 +905,7 @@ function normalizeTerminalContextsForThread(
 
 function shouldRemoveDraft(draft: ComposerThreadDraftState): boolean {
   return (
+    draft.consumedEditorTextAt === undefined &&
     draft.prompt.length === 0 &&
     draft.images.length === 0 &&
     draft.files.length === 0 &&
@@ -1363,7 +1371,7 @@ function normalizeDraftThreadEnvMode(
   value: unknown,
   fallbackWorktreePath: string | null,
 ): DraftThreadEnvMode {
-  if (value === "local" || value === "worktree") {
+  if (value === "local" || value === "worktree" || value === "rift") {
     return value;
   }
   return fallbackWorktreePath ? "worktree" : "local";
@@ -2037,9 +2045,14 @@ function normalizePersistedDraftsByThreadId(
       activeProvider = modelSelection?.instanceId ?? null;
     }
 
+    const consumedEditorTextAt =
+      typeof draftCandidate.consumedEditorTextAt === "string"
+        ? draftCandidate.consumedEditorTextAt
+        : undefined;
     const hasModelData =
       Object.keys(modelSelectionByProvider).length > 0 || activeProvider !== null;
     if (
+      consumedEditorTextAt === undefined &&
       promptCandidate.length === 0 &&
       attachments.length === 0 &&
       files.length === 0 &&
@@ -2067,6 +2080,7 @@ function normalizePersistedDraftsByThreadId(
                 : threadKeyOrId;
             })();
     nextDraftsByThreadKey[normalizedThreadKey] = {
+      ...(consumedEditorTextAt !== undefined ? { consumedEditorTextAt } : {}),
       prompt,
       attachments,
       ...(files.length > 0 ? { files } : {}),
@@ -2171,6 +2185,7 @@ export function partializeComposerDraftStoreState(
     const hasModelData =
       Object.keys(draft.modelSelectionByProvider).length > 0 || draft.activeProvider !== null;
     if (
+      draft.consumedEditorTextAt === undefined &&
       draft.prompt.length === 0 &&
       draft.persistedAttachments.length === 0 &&
       draft.files.length === 0 &&
@@ -2186,6 +2201,9 @@ export function partializeComposerDraftStoreState(
       continue;
     }
     const persistedDraft: DeepMutable<PersistedComposerThreadDraftState> = {
+      ...(draft.consumedEditorTextAt !== undefined
+        ? { consumedEditorTextAt: draft.consumedEditorTextAt }
+        : {}),
       prompt: draft.prompt,
       attachments: draft.persistedAttachments,
       ...(draft.files.length > 0
@@ -2491,6 +2509,9 @@ function toHydratedThreadDraft(
     })) ?? [];
 
   return {
+    ...(persistedDraft.consumedEditorTextAt !== undefined
+      ? { consumedEditorTextAt: persistedDraft.consumedEditorTextAt }
+      : {}),
     prompt: ensureInlineContextReferences(persistedDraft.prompt, [
       ...(persistedDraft.reviewComments ?? []).map(reviewCommentContextReference),
       ...(persistedDraft.previewAnnotations ?? []).map(previewAnnotationContextReference),
@@ -3035,6 +3056,29 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
             }
             return { draftsByThreadKey: nextDraftsByThreadKey };
           });
+        },
+        applyEditorText: (draftTarget, editorText, consumptionThreadRef) => {
+          const draftKey = resolveComposerDraftKey(get(), draftTarget);
+          const threadKey = resolveComposerDraftKey(get(), consumptionThreadRef ?? draftTarget);
+          if (!draftKey || !threadKey) return false;
+          let applied = false;
+          set((state) => {
+            const existing = state.draftsByThreadKey[threadKey] ?? createEmptyThreadDraft();
+            if (existing.consumedEditorTextAt === editorText.at) return state;
+            applied = true;
+            return {
+              draftsByThreadKey: {
+                ...state.draftsByThreadKey,
+                [threadKey]: { ...existing, consumedEditorTextAt: editorText.at },
+                [draftKey]: {
+                  ...(state.draftsByThreadKey[draftKey] ?? createEmptyThreadDraft()),
+                  prompt: editorText.text,
+                  ...(draftKey === threadKey ? { consumedEditorTextAt: editorText.at } : {}),
+                },
+              },
+            };
+          });
+          return applied;
         },
         setPrompt: (threadRef, prompt) => {
           const threadKey = resolveComposerDraftKey(get(), threadRef) ?? "";

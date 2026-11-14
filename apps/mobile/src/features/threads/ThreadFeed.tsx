@@ -31,6 +31,9 @@ import {
   type WorktreeSetupCardProps,
 } from "./worktree-setup-card";
 import * as Haptics from "expo-haptics";
+import { useAtomValue } from "@effect/atom-react";
+import { AsyncResult } from "effect/reactivity";
+import { mobilePreferencesAtom } from "../../state/preferences";
 import { KeyboardAwareLegendList } from "@legendapp/list/keyboard";
 import { useViewabilityAmount, type LegendListRef } from "@legendapp/list/react-native";
 import { scopeThreadRef } from "@t3tools/client-runtime/environment";
@@ -2553,6 +2556,7 @@ function useThreadFeedPresentation(
   expandedTurnIds: ReadonlySet<RunId>,
   expandedWorkGroups: Record<string, boolean>,
   revealedMessageId: MessageId | null,
+  terminal: boolean,
 ) {
   const [feedCache] = useState(createThreadFeedCache);
   return appendPendingThreadMessages(
@@ -2569,6 +2573,7 @@ function useThreadFeedPresentation(
       props.runlessWorkActive ?? false,
       feedCache,
       { toolCallVisibility: props.toolCallVisibility ?? "showAll", revealedMessageId },
+      terminal,
     ),
     props.feed,
     props.queuedMessages,
@@ -3249,8 +3254,18 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
   if (jumpReady && revealedMessageId !== jumpToMessageId) {
     setInteractionState((current) => ({ ...current, revealedMessageId: jumpToMessageId }));
   }
+  const transcriptPreferences = useAtomValue(mobilePreferencesAtom);
+  const terminalTranscript =
+    !AsyncResult.isSuccess(transcriptPreferences) ||
+    transcriptPreferences.value.transcriptMode !== "compact";
   const presentedFeed = appendGuestPendingMessages(
-    useThreadFeedPresentation(props, expandedTurnIds, expandedWorkGroups, revealedMessageId),
+    useThreadFeedPresentation(
+      props,
+      expandedTurnIds,
+      expandedWorkGroups,
+      revealedMessageId,
+      terminalTranscript,
+    ),
     guestShare,
   );
   const jumpRunId =
@@ -3535,7 +3550,7 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
           return undefined;
         }
         return entry.activities.some(
-          (activity) => activity.prominent || expandedWorkRows[activity.id],
+          (activity) => entry.terminal || activity.prominent || expandedWorkRows[activity.id],
         )
           ? undefined
           : collapsedWorkLogHeight(entry.activities, entry.continuesWorkLog);

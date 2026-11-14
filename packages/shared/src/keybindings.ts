@@ -95,6 +95,11 @@ export const DEFAULT_KEYBINDINGS: ReadonlyArray<KeybindingRule> = [
   { key: "alt+arrowup", command: "thread.editQueuedMessage", when: "composerFocus" },
   { key: "mod+enter", command: "composer.sendAlternate", when: "composerFocus && turnRunning" },
   {
+    key: "escape",
+    command: "thread.stop",
+    when: "composerFocus && turnRunning && !composerMenuOpen",
+  },
+  {
     key: "mod+enter",
     command: "composer.sendBackground",
     when: "composerFocus && draftThreadRoute",

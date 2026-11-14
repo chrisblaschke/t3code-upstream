@@ -2140,6 +2140,14 @@ code {
   font-size: 0.85em;
 }
 
+.chat-markdown code[data-copyable] {
+  cursor: copy;
+}
+
+.chat-markdown code[data-copied] {
+  border-color: var(--success);
+}
+
 .chat-markdown strong {
   font-weight: 700;
 }

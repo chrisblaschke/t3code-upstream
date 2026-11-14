@@ -599,7 +599,7 @@ export function resolveSidebarRowThreadId(
 
 /**
  * `delegatedUnderParent` holds the tasks linked environments run for a thread
- * the sidebar lists, by thread key; they show under that thread, as subagents do.
+ * on an enabled environment, by thread key; they show under that thread, as subagents do.
  */
 export function filterSidebarV2VisibleThreads<
   T extends Pick<SidebarThreadSummary, "archivedAt" | "environmentId" | "id" | "lineage"> & {

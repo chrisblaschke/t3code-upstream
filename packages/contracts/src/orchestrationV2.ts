@@ -663,6 +663,10 @@ export type OrchestrationV2RunBackgroundWorkCancelled =
 
 export const OrchestrationV2ThreadLaunchWorkspaceStrategy = Schema.Union([
   Schema.Struct({
+    type: Schema.Literal("rift"),
+    branch: Schema.optional(TrimmedNonEmptyString),
+  }),
+  Schema.Struct({
     type: Schema.Literal("root"),
     branch: Schema.optional(TrimmedNonEmptyString),
   }),
@@ -740,7 +744,8 @@ export function orchestrationV2WorktreePending(
     runs.some(
       (run) =>
         (run.status === "preparing" || run.status === "failed" || run.status === "interrupted") &&
-        run.workspacePreparation?.type === "worktree",
+        (run.workspacePreparation?.type === "worktree" ||
+          run.workspacePreparation?.type === "rift"),
     )
   );
 }
@@ -1032,6 +1037,8 @@ const PendingBackgroundTaskFields = {
   itemId: Schema.optional(TurnItemId),
   sourceThreadId: Schema.optional(ThreadId),
   taskId: TrimmedNonEmptyString,
+  /** The run that launched this work; absent only for legacy or unowned work. */
+  originRunId: Schema.optional(RunId),
   description: Schema.optional(TrimmedNonEmptyString),
   /** The subagent task that started this work and waits on it. */
   parentTaskId: Schema.optional(TrimmedNonEmptyString),
@@ -1049,6 +1056,7 @@ export const OrchestrationV2PendingBackgroundTask = kindUnionWithFallback(
       kind: Schema.Literal("subagent"),
       /** The owning provider thread's instance, populated in derived pending work. */
       providerInstanceId: Schema.optional(ProviderInstanceId),
+      /** The subagent's own thread, when it has one. */
       childThreadId: Schema.optional(ThreadId),
     }),
     Schema.Struct({ ...PendingBackgroundTaskFields, kind: Schema.Literal("command") }),
@@ -1056,8 +1064,9 @@ export const OrchestrationV2PendingBackgroundTask = kindUnionWithFallback(
     Schema.Struct({ ...PendingBackgroundTaskFields, kind: Schema.Literal("background_task") }),
   ],
   (kind) => Schema.Struct({ ...PendingBackgroundTaskFields, kind }),
-  ({ taskId, description, parentTaskId }) => ({
+  ({ taskId, description, parentTaskId, originRunId }) => ({
     taskId,
+    ...(originRunId === undefined ? {} : { originRunId }),
     ...(description === undefined ? {} : { description }),
     ...(parentTaskId === undefined ? {} : { parentTaskId }),
     kind: "background_task",
@@ -1067,6 +1076,12 @@ export type OrchestrationV2PendingBackgroundTask = typeof OrchestrationV2Pending
 
 export const OrchestrationV2ProviderThreadNativeMetadata = Schema.Struct({
   modelSelection: Schema.optional(ModelSelection),
+  /** Extension status entries and text widgets for the current provider session. */
+  statusLines: Schema.optional(
+    Schema.Array(Schema.Struct({ key: Schema.String, text: Schema.String })),
+  ),
+  /** One-shot extension editor prefill; cleared when the next turn starts. */
+  editorText: Schema.optional(Schema.Struct({ text: Schema.String, at: Schema.String })),
   title: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
   updatedAt: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
   itemIdentityVersion: Schema.optional(Schema.Literal(2)),
@@ -1122,6 +1137,8 @@ export const OrchestrationV2ProviderThread = Schema.Struct({
   pendingBackgroundTasks: Schema.optional(Schema.Array(OrchestrationV2PendingBackgroundTask)).pipe(
     Schema.withDecodingDefault(Effect.succeed([])),
   ),
+  // Removed from the live roster, but not yet delivered to a durable wake.
+  pendingBackgroundTaskWakes: Schema.optional(Schema.Array(OrchestrationV2PendingBackgroundTask)),
   contextUsage: Schema.optional(Schema.NullOr(ThreadTokenUsageSnapshot)).pipe(
     Schema.withDecodingDefault(Effect.succeed(null)),
   ),
@@ -1315,6 +1332,8 @@ export const OrchestrationV2NotificationSource = kindUnionWithFallback(
 export type OrchestrationV2NotificationSource = typeof OrchestrationV2NotificationSource.Type;
 
 export const OrchestrationV2Notification = Schema.Struct({
+  /** Launching runs, not the run active when this notification arrived. */
+  originRunIds: Schema.optional(Schema.Array(RunId)),
   source: OrchestrationV2NotificationSource,
   outcome: Schema.Literals(["completed", "failed", "cancelled", "updated", "unknown"]),
   summary: TrimmedNonEmptyString,
@@ -1946,6 +1965,15 @@ export const OrchestrationV2DomainEvent = Schema.Union([
     ...OrchestrationV2EventBase.fields,
     type: Schema.Literal("thread.pull-request-link-updated"),
     payload: ThreadPullRequestLink,
+  }),
+  Schema.Struct({
+    ...OrchestrationV2EventBase.fields,
+    type: Schema.Literal("thread.branch-reconciled"),
+    payload: Schema.Struct({
+      expectedBranch: Schema.NullOr(TrimmedNonEmptyString),
+      worktreePath: TrimmedNonEmptyString,
+      branch: TrimmedNonEmptyString,
+    }),
   }),
   Schema.Struct({
     ...OrchestrationV2EventBase.fields,
@@ -2841,6 +2869,15 @@ export const OrchestrationV2DomainEventJson = Schema.Union([
     ...OrchestrationV2JsonEventBaseFields,
     type: Schema.Literal("thread.pull-request-link-updated"),
     payload: ThreadPullRequestLink,
+  }),
+  Schema.Struct({
+    ...OrchestrationV2JsonEventBaseFields,
+    type: Schema.Literal("thread.branch-reconciled"),
+    payload: Schema.Struct({
+      expectedBranch: Schema.NullOr(TrimmedNonEmptyString),
+      worktreePath: TrimmedNonEmptyString,
+      branch: TrimmedNonEmptyString,
+    }),
   }),
   Schema.Struct({
     ...OrchestrationV2JsonEventBaseFields,

@@ -13,6 +13,7 @@ import {
   MessageId,
   ProjectId,
   ProviderDriverKind,
+  type RunId,
   ThreadId,
   TurnItemId,
   type AgentSessionImportInput,
@@ -32,6 +33,7 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
+import * as SqlClient from "effect/sql/SqlClient";
 
 import * as EventSink from "../orchestration-v2/EventSink.ts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
@@ -111,13 +113,19 @@ type HistoryMessage = Omit<AgentSessionScanner.AgentSessionThreadMessage, "role"
   readonly role: AgentSessionScanner.AgentSessionThreadMessage["role"] | "reasoning";
 };
 
-function messageEvents(input: {
+export function messageEvents(input: {
   readonly threadId: ThreadId;
   readonly index: number;
   readonly message: HistoryMessage;
+  /** Messages appended after import carry their own ordinal and a native ID suffix. */
+  readonly ordinal?: number;
+  readonly suffix?: string;
+  /** Positions follow the run's items; run-less items sort before every run. */
+  readonly runId?: RunId | null;
 }): ReadonlyArray<OrchestrationV2DomainEvent> {
-  const ordinal = input.index + 1;
-  const suffix = String(input.index).padStart(6, "0");
+  const runId = input.runId ?? null;
+  const ordinal = input.ordinal ?? input.index + 1;
+  const suffix = input.suffix ?? String(input.index).padStart(6, "0");
   const messageId = MessageId.make(`${input.threadId}:${suffix}`);
   const turnItemId = TurnItemId.make(
     `${IMPORT_EVENT_PREFIX}:turn-item:${input.threadId}:${suffix}`,
@@ -126,7 +134,7 @@ function messageEvents(input: {
   const common = {
     id: turnItemId,
     threadId: input.threadId,
-    runId: null,
+    runId,
     nodeId: null,
     providerThreadId: null,
     providerTurnId: null,
@@ -156,7 +164,7 @@ function messageEvents(input: {
     creationSource: "server",
     id: messageId,
     threadId: input.threadId,
-    runId: null,
+    runId,
     nodeId: null,
     role: input.message.role,
     text: input.message.text,
@@ -196,6 +204,21 @@ function messageEvents(input: {
   ];
 }
 
+/**
+ * Pi sessions that T3 Code started live in the same directory as CLI sessions.
+ * The scanner skips the files T3 threads are bound to (and what they forked from).
+ */
+const boundPiTranscripts = Effect.gen(function* () {
+  const sql = yield* Effect.serviceOption(SqlClient.SqlClient);
+  if (Option.isNone(sql)) return new Set<string>();
+  const rows = yield* sql.value<{ readonly native_id: string | null }>`
+    SELECT json_extract(payload_json, '$.nativeThreadRef.nativeId') AS native_id
+    FROM orchestration_v2_projection_provider_threads
+    WHERE driver = 'pi'
+  `.pipe(Effect.orElseSucceed(() => []));
+  return new Set(rows.flatMap((row) => (row.native_id ? [row.native_id] : [])));
+});
+
 const make = Effect.gen(function* () {
   const scanner = yield* AgentSessionScanner.AgentSessionScanner;
   const orchestrator = yield* Orchestrator.OrchestratorV2;
@@ -209,6 +232,12 @@ const make = Effect.gen(function* () {
   const ceiling = settingsService.managedPolicy?.limits?.maxRuntimeMode;
   const importRecentAgentThreads = Effect.fn("importRecentAgentThreadsV2")(function* (
     input: AgentSessionImportInput,
+    options?: {
+      /** Only import these sources. */
+      readonly sources?: ReadonlyArray<AgentSessionScanner.AgentSessionThread["source"]>;
+      /** Threads active at or after this time stay out of the settled shelf. */
+      readonly activeSinceMs?: number;
+    },
   ) {
     const project = yield* projects.getById(input.projectId).pipe(
       Effect.mapError((cause) => new AgentSessionScanError({ operation: "read-projects", cause })),
@@ -261,7 +290,15 @@ const make = Effect.gen(function* () {
       }
       return payload.value.importedTranscripts ?? [];
     });
-    const outcomes = scanner.recentThreads(project.workspaceRoot, completedSources);
+    const outcomes = scanner.recentThreads(
+      project.workspaceRoot,
+      completedSources,
+      yield* boundPiTranscripts,
+      options?.sources,
+      // Pi sync computes one active window per file-event batch, shared by all projects.
+      // Do not reuse discovery from an earlier batch, even inside the cache TTL.
+      options?.activeSinceMs,
+    );
     const importedThreadIds = new Set<ThreadId>();
     let importedCount = 0;
     let skippedCount = 0;
@@ -273,6 +310,7 @@ const make = Effect.gen(function* () {
           return;
         }
         const source = outcome.source;
+        if (options?.sources !== undefined && !options.sources.includes(source.provider)) return;
         const threadId = ThreadId.make(
           `import:${source.providerInstanceId}:${source.providerSessionId}`,
         );
@@ -345,6 +383,9 @@ const make = Effect.gen(function* () {
           });
           const createdAt = dateTime(thread.createdAt);
           const updatedAt = dateTime(thread.updatedAt);
+          const settled =
+            options?.activeSinceMs === undefined ||
+            DateTime.toEpochMillis(updatedAt) < options.activeSinceMs;
           const appThread: OrchestrationV2AppThread = {
             createdBy: "system",
             creationSource: "server",
@@ -370,8 +411,8 @@ const make = Effect.gen(function* () {
             createdAt,
             updatedAt,
             archivedAt: null,
-            settledOverride: "settled",
-            settledAt: updatedAt,
+            settledOverride: settled ? "settled" : null,
+            settledAt: settled ? updatedAt : null,
             unsettledAt: null,
             snoozedUntil: null,
             snoozedAt: null,
@@ -393,7 +434,10 @@ const make = Effect.gen(function* () {
               nativeId: nativeThreadId,
               strength: "strong",
             },
-            nativeConversationHeadRef: null,
+            nativeConversationHeadRef:
+              thread.nativeHeadId === undefined
+                ? null
+                : { driver, nativeId: thread.nativeHeadId, strength: "strong" },
             status: "idle",
             firstRunOrdinal: null,
             lastRunOrdinal: null,

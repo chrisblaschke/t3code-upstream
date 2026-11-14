@@ -881,7 +881,10 @@ export const layer: Layer.Layer<
       const tokenCap = yield* handoffTokenCapConfig.pipe(
         Effect.orElseSucceed(() => DEFAULT_HANDOFF_TOKEN_CAP),
       );
-      const handoffContextForThread = (loadedProviderThread: OrchestrationV2ProviderThread) => {
+      const handoffContextForThread = (
+        loadedProviderThread: OrchestrationV2ProviderThread,
+        updatedAt: DateTime.Utc,
+      ) => {
         const measuredContext = latestNativeContextUsage(projection, providerThread);
         const previousSelection =
           measuredContext?.modelSelection ??
@@ -910,6 +913,7 @@ export const layer: Layer.Layer<
           resolvedRuntimePolicy.cwd,
         );
         const handoffUsage = contextUsageForHandoff({
+          updatedAt: DateTime.formatIso(updatedAt),
           sameNativeThread,
           sameSelection,
           reuseTelemetry,
@@ -1284,7 +1288,7 @@ export const layer: Layer.Layer<
               }),
         );
         if (resumed._tag === "Success") {
-          const context = handoffContextForThread(resumed.success);
+          const context = handoffContextForThread(resumed.success, yield* DateTime.now);
           context.budget = yield* Effect.cached(context.budget);
           resumedHandoffContext = context;
           resumedRetryHandoff = yield* prepareRetryHandoff(context);
@@ -1301,7 +1305,7 @@ export const layer: Layer.Layer<
           );
           if (fits) return resumed.success;
           const freshThread = { ...resumed.success, nativeThreadRef: null };
-          const freshContext = handoffContextForThread(freshThread);
+          const freshContext = handoffContextForThread(freshThread, yield* DateTime.now);
           const { handoff } = yield* recoveryHandoff;
           const fitsFresh = yield* deliverContextHandoffs({
             handoffs: withRecoveryHandoff(handoff),
@@ -1465,7 +1469,8 @@ export const layer: Layer.Layer<
         return;
       }
       const now = yield* DateTime.now;
-      const handoffContext = resumedHandoffContext ?? handoffContextForThread(loadedProviderThread);
+      const handoffContext =
+        resumedHandoffContext ?? handoffContextForThread(loadedProviderThread, now);
       const {
         sameNativeThread,
         handoffUsage,

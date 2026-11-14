@@ -423,6 +423,22 @@
       "types": "./src/work-log/toolPresentation.ts",
       "default": "./src/work-log/toolPresentation.ts"
     },
+    "./state/thread-usage-limits": {
+      "types": "./src/state/threadUsageLimits.ts",
+      "default": "./src/state/threadUsageLimits.ts"
+    },
+    "./state/composer-meters": {
+      "types": "./src/state/composerMeters.ts",
+      "default": "./src/state/composerMeters.ts"
+    },
+    "./state/pi-tui": {
+      "types": "./src/state/piTui.ts",
+      "default": "./src/state/piTui.ts"
+    },
+    "./work-log/terminal-output": {
+      "types": "./src/work-log/terminalOutput.ts",
+      "default": "./src/work-log/terminalOutput.ts"
+    },
     "./work-log/command-label": {
       "types": "./src/work-log/commandLabel.ts",
       "default": "./src/work-log/commandLabel.ts"

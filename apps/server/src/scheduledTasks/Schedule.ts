@@ -70,7 +70,9 @@ export function isSameSchedule(a: ScheduledTaskSchedule, b: ScheduledTaskSchedul
   );
 }
 
-const MISSED_FIXED_TIME_GRACE_MS = 10 * MINUTE_MS;
+// Fork: upstream skips a slot once it is 10 minutes late. A slot missed while the server
+// was off or asleep still runs once if it is under 12 hours late.
+const MISSED_FIXED_TIME_GRACE_MS = 12 * 60 * MINUTE_MS;
 
 export function isMissedFixedTimeRun(
   schedule: ScheduledTaskSchedule,

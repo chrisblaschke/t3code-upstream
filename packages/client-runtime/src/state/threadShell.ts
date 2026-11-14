@@ -57,9 +57,9 @@ const isChildRunLive = (
 
 /**
  * Whether a thread shows under its parent rather than in thread lists: a
- * subagent, a side chat, or a task a linked environment delegated here whose parent the
- * client lists (`delegatedUnderParent`, by thread key). A task whose parent
- * the client cannot list stays in the lists, so its work is never out of reach.
+ * subagent, a side chat, or a linked task with an enabled, unarchived parent
+ * (`delegatedUnderParent`, by thread key). Shells may omit settled parents;
+ * only an explicitly archived parent or unavailable environment unnests its task.
  */
 export function isShownUnderParent(
   ref: ScopedThreadRef,
@@ -670,14 +670,15 @@ export function createEnvironmentThreadShellAtoms(input: {
     for (const environmentId of environmentIds) {
       for (const thread of get(environmentThreadsAtom(environmentId))) {
         const parent = thread.delegatedFrom;
-        if (
-          parent !== undefined &&
-          environmentIds.has(parent.environmentId) &&
-          // An archived parent leaves navigation; its task there stays listed on its own.
-          get(environmentThreadIndexAtom(parent.environmentId)).get(parent.threadId)?.archivedAt ===
-            null
-        ) {
-          next.add(threadKey({ environmentId, threadId: thread.id }));
+        // Missing parents may just be settled and omitted by the shell. Archived
+        // parents cannot surface their tasks or questions, so list those tasks alone.
+        if (parent !== undefined && environmentIds.has(parent.environmentId)) {
+          const parentThread = get(environmentThreadIndexAtom(parent.environmentId)).get(
+            parent.threadId,
+          );
+          if (parentThread === undefined || parentThread.archivedAt === null) {
+            next.add(threadKey({ environmentId, threadId: thread.id }));
+          }
         }
       }
     }

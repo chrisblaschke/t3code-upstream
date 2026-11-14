@@ -50,6 +50,7 @@ export function parsePiDiscoveredCommands(data: unknown): PiDiscoveredCommands {
   for (const command of commands) {
     const commandName = recordString(command, "name");
     if (commandName === undefined || commandName.length === 0) continue;
+    if (commandName === "t3-internal:fork-before-bash") continue;
     const description = recordString(command, "description");
     if (recordString(command, "source") === "skill") {
       const name = commandName.startsWith("skill:")

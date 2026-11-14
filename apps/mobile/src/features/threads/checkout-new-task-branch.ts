@@ -19,7 +19,7 @@ const VCS_REF_QUERY_MAX_LENGTH = 256;
 export async function checkoutNewTaskBranch<E>(input: {
   readonly branch: VcsRef;
   readonly project: Pick<EnvironmentProject, "environmentId" | "workspaceRoot"> | null;
-  readonly workspaceMode: "local" | "worktree";
+  readonly workspaceMode: "local" | "worktree" | "rift";
   readonly readRefs: (request: {
     readonly environmentId: EnvironmentProject["environmentId"];
     readonly input: VcsListRefsInput;
@@ -34,7 +34,7 @@ export async function checkoutNewTaskBranch<E>(input: {
       Cause.fail(new Error("The selected project is unavailable. Reconnect and try again.")),
     );
   }
-  if (input.workspaceMode === "worktree" || input.branch.current) {
+  if (input.workspaceMode !== "local" || input.branch.current) {
     return AsyncResult.success(
       input.branch.current ? { ...input.branch, worktreePath: null } : input.branch,
     );

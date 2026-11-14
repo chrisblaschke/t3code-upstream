@@ -39,13 +39,17 @@ import {
 import { symlinksSupported } from "@t3tools/shared/testing/symlinks";
 import * as ServerConfig from "../config.ts";
 import {
-  makeGitVcsDriverCore,
+  makeGitVcsDriverCore as makeCore,
   parseGitCheckoutProgressLine,
   splitNullSeparatedGitStdoutPaths,
   windowsLongPathConfigEnv,
 } from "./GitVcsDriverCore.ts";
 import * as GitVcsDriver from "./GitVcsDriver.ts";
 import { gitConfigEnv } from "./VcsProcess.ts";
+
+import * as RiftWorkspaces from "./RiftWorkspaces.ts";
+
+const makeGitVcsDriverCore = () => makeCore().pipe(Effect.provide(RiftWorkspaces.layer));
 
 const encodeGitCommandError = Schema.encodeEffect(Schema.fromJsonString(GitCommandError));
 const decodeVcsRef = Schema.decodeUnknownSync(VcsRef);

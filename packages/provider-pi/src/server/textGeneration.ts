@@ -1,3 +1,7 @@
+// @effect-diagnostics nodeBuiltinImport:off - synchronous optional-extension probe during CLI argument assembly
+import * as NodeFS from "node:fs";
+import * as NodePath from "node:path";
+
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import * as Queue from "effect/Queue";
@@ -5,10 +9,11 @@ import * as Schema from "effect/Schema";
 import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 
 import { TextGenerationError } from "@t3tools/contracts";
+import { getModelSelectionStringOptionValue } from "@t3tools/shared/model";
 import type { PiSettings } from "../settings.ts";
 
 import { makePiRpcConnection, piRecordField, piRecordString, resolvePiModelSlug } from "./rpc.ts";
-import { buildPiRpcLaunch, resolvePiLaunchArgs } from "./mcpInjection.ts";
+import { buildPiRpcLaunch, resolvePiAgentDir, resolvePiLaunchArgs } from "./mcpInjection.ts";
 import * as TextGenerationOperations from "@t3tools/provider-core/server/textGenerationOperations";
 
 const PI_TIMEOUT_MS = 180_000;
@@ -23,6 +28,15 @@ const piTurnErrorDetail = (errorMessage: string | undefined) => {
     ? "Pi could not generate text: the model provider reported an error."
     : `Pi could not generate text: the model provider returned HTTP ${status}.`;
 };
+
+const PI_THINKING_LEVELS = new Set(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
+
+// --no-extensions also drops the user's ChatGPT-subscription Fast tier.
+// Explicitly load only that extension when present; Pi's catalog may advertise no tiers.
+function fastTierExtensionArgs(environment: NodeJS.ProcessEnv): ReadonlyArray<string> {
+  const path = NodePath.join(resolvePiAgentDir(environment), "extensions", "codex-fast.ts");
+  return NodeFS.existsSync(path) ? ["--extension", path] : [];
+}
 
 export const makePiTextGeneration = Effect.fn("makePiTextGeneration")(function* (
   piSettings: PiSettings,
@@ -42,7 +56,9 @@ export const makePiTextGeneration = Effect.fn("makePiTextGeneration")(function* 
         });
       }
       const launch = buildPiRpcLaunch({
-        launchArgs: resolvedLaunchArgs.args,
+        // A titler or commit-message writer needs neither the user's AGENTS.md
+        // nor a skill catalog it has no tools to read; both are only noise.
+        launchArgs: [...resolvedLaunchArgs.args, "--no-context-files", "--no-skills"],
         environment,
         mcpSession: undefined,
         extensionPath: undefined,
@@ -54,7 +70,7 @@ export const makePiTextGeneration = Effect.fn("makePiTextGeneration")(function* 
       });
       const connection = yield* makePiRpcConnection({
         command: piSettings.binaryPath || "pi",
-        args: launch.args,
+        args: [...launch.args, ...fastTierExtensionArgs(environment)],
         cwd,
         env: launch.env,
       }).pipe(Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner));
@@ -89,6 +105,12 @@ export const makePiTextGeneration = Effect.fn("makePiTextGeneration")(function* 
                 : error,
             ),
           );
+      }
+
+      // Without this, Pi's default thinking level (often xhigh) applies to titles.
+      const thinking = getModelSelectionStringOptionValue(modelSelection, "thinking");
+      if (thinking !== undefined && PI_THINKING_LEVELS.has(thinking)) {
+        yield* connection.request({ type: "set_thinking_level", level: thinking });
       }
 
       yield* connection.request({ type: "prompt", message: prompt });

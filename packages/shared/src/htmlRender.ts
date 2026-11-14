@@ -239,6 +239,7 @@ export const HTML_RENDER_LAYOUT_GUIDE = [
 
 const HOST_CONTEXT_CHANGED_METHOD = "ui/notifications/host-context-changed";
 const OPEN_LINK_METHOD = "ui/open-link";
+const MESSAGE_METHOD = "ui/message";
 const SIZE_CHANGED_METHOD = "ui/notifications/size-changed";
 // Custom bridge forwards app shortcuts because focused frames otherwise capture them.
 const SHORTCUTS_METHOD = "t3/notifications/shortcuts";
@@ -337,6 +338,35 @@ export function htmlRenderShortcutsMessage(
 
 export function htmlRenderResult(id: string | number) {
   return { jsonrpc: "2.0", id, result: {} } as const;
+}
+
+export function htmlRenderError(id: string | number, message: string) {
+  return { jsonrpc: "2.0", id, error: { code: -32000, message } } as const;
+}
+
+/** MCP Apps `ui/message`: a page drafts a user message, which T3 confirms before sending. */
+export function readHtmlRenderMessage(
+  data: unknown,
+): { readonly id: string | number; readonly text: string } | undefined {
+  if (typeof data !== "object" || data === null) return undefined;
+  const { jsonrpc, id, method, params } = data as Record<string, unknown>;
+  if (jsonrpc !== "2.0" || method !== MESSAGE_METHOD) return undefined;
+  if (typeof id !== "string" && typeof id !== "number") return undefined;
+  if (typeof params !== "object" || params === null) return undefined;
+  const { role, content } = params as Record<string, unknown>;
+  if (role !== "user") return undefined;
+  const blocks = Array.isArray(content) ? content : [content];
+  const texts = blocks.map((block) =>
+    typeof block === "object" &&
+    block !== null &&
+    (block as { type?: unknown }).type === "text" &&
+    typeof (block as { text?: unknown }).text === "string"
+      ? (block as { text: string }).text
+      : undefined,
+  );
+  if (texts.length === 0 || texts.includes(undefined)) return undefined;
+  const text = texts.join("\n").trim();
+  return text === "" ? undefined : { id, text };
 }
 
 const THEME_FRAGMENT_KEY = "t3-theme";

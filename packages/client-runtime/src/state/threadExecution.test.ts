@@ -21,6 +21,7 @@ import { describe, expect, it } from "vite-plus/test";
 import { v2Projection } from "./orchestrationV2TestFixtures.ts";
 import {
   deriveReportedModelSelection,
+  deriveActiveProviderThreadNativeMetadata,
   deriveLatestThreadRun,
   deriveProviderSubagentStatus,
   deriveProviderExtensionStatuses,
@@ -501,6 +502,40 @@ describe("deriveProviderSubagentStatus", () => {
   });
 });
 
+describe("formatModelSelectionEffort", () => {
+  it("names Pi's thinking level, but not Claude's thinking toggle", () => {
+    const pi = (type: "select" | "boolean") => [
+      {
+        slug: "openai-codex/gpt-6.1-sol",
+        name: "Sol 6.1",
+        isCustom: false,
+        capabilities: {
+          optionDescriptors: [
+            type === "select"
+              ? {
+                  id: "thinking",
+                  label: "Thinking",
+                  type,
+                  options: [
+                    { id: "medium", label: "Medium", isDefault: true },
+                    { id: "xhigh", label: "Extra High" },
+                  ],
+                }
+              : { id: "thinking", label: "Thinking", type },
+          ],
+        },
+      },
+    ];
+    const sol = {
+      instanceId: ProviderInstanceId.make("pi"),
+      model: "openai-codex/gpt-6.1-sol",
+      options: [{ id: "thinking", value: "xhigh" }],
+    };
+    expect(formatModelSelectionEffort(sol, pi("select"))).toBe("Extra High");
+    expect(formatModelSelectionEffort(sol, pi("boolean"))).toBeNull();
+  });
+});
+
 describe("provider-reported model selection", () => {
   const selected = v2Projection.thread.modelSelection;
   const reported = { ...selected, options: [{ id: "reasoningEffort", value: "default" }] };
@@ -541,6 +576,32 @@ describe("provider-reported model selection", () => {
         ...projection,
         providerThreads: [
           { ...providerThread, providerInstanceId: ProviderInstanceId.make("other") },
+        ],
+      }),
+    ).toBeNull();
+  });
+
+  it("does not expose extension UI from an inactive provider or provider instance", () => {
+    const metadata = { statusLines: [{ key: "limits", text: "80%" }] };
+    const withStatus = {
+      ...projection,
+      providerThreads: [{ ...providerThread, nativeMetadata: metadata }],
+    };
+    expect(deriveActiveProviderThreadNativeMetadata(withStatus)).toBe(metadata);
+    expect(
+      deriveActiveProviderThreadNativeMetadata({
+        ...withStatus,
+        thread: { ...withStatus.thread, activeProviderThreadId: null },
+      }),
+    ).toBeNull();
+    expect(
+      deriveActiveProviderThreadNativeMetadata({
+        ...withStatus,
+        providerThreads: [
+          {
+            ...withStatus.providerThreads[0]!,
+            providerInstanceId: ProviderInstanceId.make("other"),
+          },
         ],
       }),
     ).toBeNull();

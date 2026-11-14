@@ -10,6 +10,7 @@ import {
   timelineHasEphemeralPreviewUrls,
 } from "../ChatView.logic";
 import { MessagesTimeline } from "./MessagesTimeline";
+import { useClientSettings } from "../../hooks/useSettings";
 
 /**
  * The timeline with the streamed text. ChatView reads the thread through its quiet
@@ -35,6 +36,9 @@ export function ThreadTimeline({
   syncing: boolean;
   detailLoading: boolean;
 }) {
+  const terminalTranscript = useClientSettings(
+    (settings) => settings.transcriptMode === "terminal",
+  );
   const visibleTurnItems = useTimelineVisibleTurnItems(threadDetailRef);
   const serverEntries = useIncrementalTimelineEntries(activeThreadKey, {
     ...entriesInput,
@@ -54,5 +58,11 @@ export function ThreadTimeline({
     }
     rememberReadyThreadTimeline({ threadKey: activeThreadKey, entries });
   }, [activeThreadKey, detailLoading, entries]);
-  return <MessagesTimeline {...timelineProps} timelineEntries={displayedEntries} />;
+  return (
+    <MessagesTimeline
+      {...timelineProps}
+      terminalTranscript={terminalTranscript}
+      timelineEntries={displayedEntries}
+    />
+  );
 }

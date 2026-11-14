@@ -34,6 +34,7 @@ import {
 } from "@t3tools/contracts";
 import { dedupeRemoteBranchesWithLocalMatches } from "@t3tools/shared/git";
 import * as HostProcess from "@t3tools/shared/HostProcess";
+import * as RiftWorkspaces from "./RiftWorkspaces.ts";
 import { compactTraceAttributes } from "@t3tools/shared/observability";
 import { decodeJsonResult } from "@t3tools/shared/schemaJson";
 import { resolveSpawnCommand, runsGitWithoutConsole } from "@t3tools/shared/shell";
@@ -957,6 +958,7 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
   const serviceScope = yield* Effect.scope;
   const statusFetches = new Map<string, Fiber.Fiber<void, GitCommandError>>();
   const statusFetchProcesses = yield* Semaphore.make(4);
+  const rift = yield* RiftWorkspaces.RiftWorkspaces;
 
   const executeRaw: GitVcsDriver.GitVcsDriver["Service"]["execute"] = Effect.fnUntraced(
     function* (input) {
@@ -4294,6 +4296,7 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
           : { isAtRepositoryRoot: repositoryPaths.isAtRepositoryRoot }),
         refs: [...refs.refs],
         isRepo: true,
+        riftUsable: yield* rift.usable(input.cwd),
         hasPrimaryRemote: snapshot.hasPrimaryRemote,
         nextCursor: refs.nextCursor,
         totalCount: refs.totalCount,
@@ -4353,6 +4356,27 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
     yield* refuseOptionLikeRefName("GitVcsDriver.createWorktree", input.cwd, input.refName);
     yield* refuseOptionLikeRefName("GitVcsDriver.createWorktree", input.cwd, input.newRefName);
     const targetBranch = input.newRefName ?? input.refName;
+    if (input.workspaceKind === "rift") {
+      const workspace = yield* rift.create(input.cwd, targetBranch);
+      yield* Effect.gen(function* () {
+        if (options?.progress?.onWorktreeClaimed) {
+          yield* options.progress.onWorktreeClaimed(workspace);
+        }
+        // Preserve the copied index and dirty files; never check out a base ref.
+        yield* runGit("RiftWorkspaces.createBranch", workspace, ["switch", "-c", targetBranch]);
+      }).pipe(
+        Effect.onError(() =>
+          rift
+            .remove(input.cwd, workspace)
+            .pipe(
+              Effect.catchCause((cause) =>
+                Effect.logWarning("Failed to roll back rift workspace", { cause }),
+              ),
+            ),
+        ),
+      );
+      return { worktree: { path: workspace, refName: targetBranch } };
+    }
     // Resolve sub/.. before taking the basename.
     const repoName = path.basename(path.resolve(input.cwd));
     let worktreePath = input.path;
@@ -4921,6 +4945,11 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
   const removeWorktree: GitVcsDriver.GitVcsDriver["Service"]["removeWorktree"] = Effect.fn(
     "removeWorktree",
   )(function* (input) {
+    const copies = yield* rift.list(input.cwd).pipe(Effect.orElseSucceed(() => []));
+    if (copies.some((copy) => path.resolve(copy) === path.resolve(input.cwd, input.path))) {
+      yield* rift.remove(input.cwd, input.path);
+      return;
+    }
     // Git also matches a worktree by its short name, which can name a different
     // folder than this path. Resolving it once keeps Git, the Windows deletion
     // in removeLinkedWorktree, and the leftover cleanup below on one directory.
@@ -5204,6 +5233,12 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
             ? []
             : [path.resolve(cwd, worktree.slice("worktree ".length))];
         }),
+      ),
+      Effect.flatMap((worktrees) =>
+        rift.list(cwd).pipe(
+          Effect.orElseSucceed(() => []),
+          Effect.map((copies) => [...worktrees, ...copies]),
+        ),
       ),
     );
 

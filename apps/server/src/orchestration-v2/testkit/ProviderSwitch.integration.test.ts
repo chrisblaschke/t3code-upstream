@@ -773,6 +773,7 @@ describe("orchestration v2 provider switching", () => {
           if (scenario.includes("retry")) yield* Ref.set(failStartOnce, true);
           if (scenario.includes("target-background") || scenario.includes("target-subagent"))
             yield* Ref.set(pendingBackgroundWork, true);
+          const budgetRecalculatedAfter = DateTime.toEpochMillis(yield* DateTime.now);
           yield* dispatch(targetOrdinal, current, targetSelection);
           yield* wait(targetOrdinal);
           if (scenario.includes("retry")) {
@@ -782,10 +783,13 @@ describe("orchestration v2 provider switching", () => {
               (thread) => thread.providerInstanceId === CLAUDE_MODEL_SELECTION.instanceId,
             )!.contextUsage;
             if (reasoningScenario || scenario.includes("turn-usage")) {
-              assert.deepEqual(failedUsage, { usedTokens: 37_321, maxTokens: 258_400 });
+              assert.containsSubset(failedUsage, { usedTokens: 37_321, maxTokens: 258_400 });
             } else {
-              assert.deepEqual(failedUsage, { usedTokens: 30_000, maxTokens: 1_000_000 });
+              assert.containsSubset(failedUsage, { usedTokens: 30_000, maxTokens: 1_000_000 });
             }
+            assert.isString(failedUsage?.updatedAt);
+            assert.isAtLeast(Date.parse(failedUsage!.updatedAt!), budgetRecalculatedAfter);
+            assert.notProperty(failedUsage, "autoCompactThreshold");
             if (reasoningScenario) {
               const target = failed.providerThreads.find(
                 (thread) => thread.providerInstanceId === CLAUDE_MODEL_SELECTION.instanceId,
@@ -971,7 +975,10 @@ describe("orchestration v2 provider switching", () => {
             if (turnUsageScenario) {
               if (replaceNative) assert.isNull(target.contextUsage);
               else
-                assert.deepEqual(target.contextUsage, { usedTokens: 37_321, maxTokens: 258_400 });
+                assert.containsSubset(target.contextUsage, {
+                  usedTokens: 37_321,
+                  maxTokens: 258_400,
+                });
               assert.lengthOf((yield* Ref.get(capturedTurns)).at(-1)!.attachments, 2);
             }
             if (replaceNative) assert.equal(yield* Ref.get(generation), 2);

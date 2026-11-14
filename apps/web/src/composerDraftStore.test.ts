@@ -220,6 +220,89 @@ function draftByKey(key: string) {
   return useComposerDraftStore.getState().draftsByThreadKey[key] ?? undefined;
 }
 
+describe("provider editor prefill", () => {
+  beforeEach(resetComposerDraftStore);
+  afterEach(resetComposerDraftStore);
+
+  it.each([false, true])(
+    "keeps queued-run edit text after a consumed prefill (reload: %s)",
+    async (reload) => {
+      await useComposerDraftStore.persist.clearStorage();
+      vi.useFakeTimers();
+      try {
+        const threadRef = scopeThreadRef(TEST_ENVIRONMENT_ID, ThreadId.make("prefill-queued"));
+        const editorText = { text: "original prefill", at: "2026-10-07T00:00:00Z" };
+        const editTarget = DraftId.make(`queued-edit:${scopedThreadKey(threadRef)}:run-1`);
+        expect(useComposerDraftStore.getState().applyEditorText(threadRef, editorText)).toBe(true);
+        useComposerDraftStore.getState().setPrompt(threadRef, "my in-progress draft");
+        if (reload) {
+          await vi.advanceTimersByTimeAsync(300);
+          resetComposerDraftStore();
+          await useComposerDraftStore.persist.rehydrate();
+        }
+        // beginEditingQueuedRun loads the queued text into a fresh per-run draft.
+        useComposerDraftStore.getState().setPrompt(editTarget, "queued message to edit");
+        const applied = useComposerDraftStore
+          .getState()
+          .applyEditorText(editTarget, editorText, threadRef);
+        expect(useComposerDraftStore.getState().getComposerDraft(editTarget)?.prompt).toBe(
+          "queued message to edit",
+        );
+        expect(applied).toBe(false);
+        const nextEditorText = { text: "new prefill", at: "2026-10-07T00:00:01Z" };
+        expect(
+          useComposerDraftStore.getState().applyEditorText(editTarget, nextEditorText, threadRef),
+        ).toBe(true);
+        expect(useComposerDraftStore.getState().getComposerDraft(editTarget)?.prompt).toBe(
+          "new prefill",
+        );
+        expect(useComposerDraftStore.getState().applyEditorText(threadRef, nextEditorText)).toBe(
+          false,
+        );
+        expect(useComposerDraftStore.getState().getComposerDraft(threadRef)?.prompt).toBe(
+          "my in-progress draft",
+        );
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it.each(["edited draft", ""])(
+    "does not overwrite %j after remount or reload, but accepts a new prefill",
+    async (edited) => {
+      await useComposerDraftStore.persist.clearStorage();
+      vi.useFakeTimers();
+      try {
+        const threadRef = scopeThreadRef(TEST_ENVIRONMENT_ID, ThreadId.make("prefill"));
+        const editorText = { text: "original prefill", at: "2026-10-07T00:00:00Z" };
+        expect(useComposerDraftStore.getState().applyEditorText(threadRef, editorText)).toBe(true);
+        useComposerDraftStore.getState().setPrompt(threadRef, edited);
+        expect(useComposerDraftStore.getState().applyEditorText(threadRef, editorText)).toBe(false);
+        expect(useComposerDraftStore.getState().getComposerDraft(threadRef)?.prompt).toBe(edited);
+        await vi.advanceTimersByTimeAsync(300);
+        resetComposerDraftStore();
+        await useComposerDraftStore.persist.rehydrate();
+        expect(useComposerDraftStore.getState().applyEditorText(threadRef, editorText)).toBe(false);
+        expect(useComposerDraftStore.getState().getComposerDraft(threadRef)?.prompt).toBe(edited);
+        const otherRef = scopeThreadRef(OTHER_TEST_ENVIRONMENT_ID, threadRef.threadId);
+        expect(useComposerDraftStore.getState().applyEditorText(otherRef, editorText)).toBe(true);
+        expect(
+          useComposerDraftStore.getState().applyEditorText(threadRef, {
+            text: "new prefill",
+            at: "2026-10-07T00:00:01Z",
+          }),
+        ).toBe(true);
+        expect(useComposerDraftStore.getState().getComposerDraft(threadRef)?.prompt).toBe(
+          "new prefill",
+        );
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+});
+
 describe("composerDraftStore addImages", () => {
   const threadId = ThreadId.make("thread-dedupe");
   const threadRef = scopeThreadRef(TEST_ENVIRONMENT_ID, threadId);

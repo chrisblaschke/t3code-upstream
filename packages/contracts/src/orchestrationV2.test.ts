@@ -5,6 +5,8 @@ import * as Schema from "effect/Schema";
 import { NodeId, RunAttemptId, TrimmedNonEmptyString } from "./index.ts";
 import {
   latestProviderTurnForAttempt,
+  orchestrationV2WorktreePending,
+  type OrchestrationV2Run,
   OrchestrationV2ProviderCapabilities,
   OrchestrationV2ProviderThread,
   OrchestrationV2ProviderThreadJson,
@@ -35,6 +37,14 @@ const decodeOrchestrationV2ProviderCapabilities = Schema.decodeUnknownSync(
 );
 
 describe("orchestration V2 contracts", () => {
+  it.each(["preparing", "failed", "interrupted"] as const)(
+    "holds queued messages while a Rift workspace is %s and missing",
+    (status) => {
+      const runs = [{ status, workspacePreparation: { type: "rift" } }] as OrchestrationV2Run[];
+      expect(orchestrationV2WorktreePending(null, runs)).toBe(true);
+      expect(orchestrationV2WorktreePending("/ready/rift", runs)).toBe(false);
+    },
+  );
   it("decodes thread event types from a newer server as skippable items", () => {
     const decodeWireItems = Schema.decodeUnknownSync(
       Schema.toCodecJson(Schema.Array(OrchestrationV2RpcSchemas.subscribeThread.output)),
@@ -487,6 +497,34 @@ describe("thread open stats", () => {
   });
 });
 
+it("preserves extension UI metadata through provider-thread wire encoding", () => {
+  const metadata = {
+    statusLines: [{ key: "widget", text: "first\nsecond" }],
+    editorText: { text: "", at: "2026-10-07T12:00:00.000Z" },
+    title: "existing",
+  };
+  const thread = decodeOrchestrationV2ProviderThread({
+    id: "pi-thread",
+    driver: "pi",
+    providerInstanceId: "pi",
+    providerSessionId: null,
+    appThreadId: "thread",
+    ownerNodeId: null,
+    nativeThreadRef: null,
+    nativeConversationHeadRef: null,
+    status: "idle",
+    firstRunOrdinal: null,
+    lastRunOrdinal: null,
+    handoffIds: [],
+    forkedFrom: null,
+    nativeMetadata: metadata,
+    createdAt: now,
+    updatedAt: now,
+  });
+  const wire = encodeOrchestrationV2ProviderThreadJson(thread);
+  expect(decodeOrchestrationV2ProviderThreadJson(wire).nativeMetadata).toEqual(metadata);
+});
+
 describe("background work kinds from older or newer servers", () => {
   const storedNotification = (source: unknown) => ({
     id: "notification",
@@ -585,7 +623,13 @@ describe("background work kinds from older or newer servers", () => {
       pendingBackgroundTasks: [
         { taskId: "bg-1", description: "Background sleep", taskType: "local_bash" },
         { taskId: "bg-2" },
-        { taskId: "bg-3", description: "Nightly", kind: "workflow", schedule: "0 3 * * *" },
+        {
+          taskId: "bg-3",
+          description: "Nightly",
+          kind: "workflow",
+          schedule: "0 3 * * *",
+          originRunId: "run:nightly",
+        },
         { taskId: "bg-4", description: "npm test", kind: "command" },
         { taskId: "bg-5", kind: "subagent", childThreadId: "thread-child" },
         { taskId: "bg-6", kind: "subagent", providerInstanceId: "claudeAgent" },
@@ -594,7 +638,12 @@ describe("background work kinds from older or newer servers", () => {
     expect(providerThread.pendingBackgroundTasks).toEqual([
       { taskId: "bg-1", description: "Background sleep", kind: "background_task" },
       { taskId: "bg-2", kind: "background_task" },
-      { taskId: "bg-3", description: "Nightly", kind: "background_task" },
+      {
+        taskId: "bg-3",
+        description: "Nightly",
+        kind: "background_task",
+        originRunId: "run:nightly",
+      },
       { taskId: "bg-4", description: "npm test", kind: "command" },
       { taskId: "bg-5", kind: "subagent", childThreadId: "thread-child" },
       { taskId: "bg-6", kind: "subagent", providerInstanceId: "claudeAgent" },

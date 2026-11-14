@@ -14,6 +14,8 @@ import { mobilePreferencesAtom } from "../../state/preferences";
 import { parseThreadKey, threadKey } from "@t3tools/client-runtime/state/entities";
 import { createThreadVisitTracker } from "@t3tools/client-runtime/state/thread-visits";
 import { useChildThreadInputs, useThreadReportedModelSelection } from "../../state/entities";
+import { deriveActiveProviderThreadNativeMetadata } from "@t3tools/client-runtime/state/thread-execution";
+import { AppText as Text } from "../../components/ui/AppText";
 import { UsageLimitRecoveryCard } from "./UsageLimitRecoveryCard";
 import { useFocusEffect, useNavigation } from "@react-navigation/native";
 import {
@@ -127,10 +129,14 @@ import {
   useNativeLayoutMetrics,
 } from "../../native/native-layout-metrics";
 import { useAppearancePreferences } from "../settings/appearance/AppearancePreferencesProvider";
-import { collectProviderUsageLimits } from "@t3tools/shared/usageLimits";
+import { collectThreadUsageLimits } from "@t3tools/client-runtime/state/thread-usage-limits";
 import type { ComposerEditorHandle } from "../../components/ComposerEditor";
 import type { StatusTone } from "../../components/StatusPill";
-import { getComposerDraftSnapshot, setFreshSessionPending } from "../../state/use-composer-drafts";
+import {
+  applyComposerEditorText,
+  getComposerDraftSnapshot,
+  setFreshSessionPending,
+} from "../../state/use-composer-drafts";
 import { RenderErrorBoundary, RenderFailureView } from "../../components/RenderErrorBoundary";
 import {
   ANDROID_READING_MAX_WIDTH,
@@ -375,6 +381,9 @@ const threadVisitTracker = createThreadVisitTracker({
 
 // Past the composer's 180 ms height animation.
 const COMPOSER_HEIGHT_SETTLE_MS = 220;
+const NO_NATIVE_METADATA_ATOM = Atom.make(null).pipe(
+  Atom.withLabel("mobile-thread-native-metadata:empty"),
+);
 const NO_RUN_STOP_ATOM = Atom.make<RunStopPresentation | null>(null).pipe(
   Atom.withLabel("mobile-thread-run-stop:empty"),
 );
@@ -422,6 +431,13 @@ function ThreadDetailBody(
   const openInspector = useOpenThreadInspector();
   const { session: voiceInputSession } = useGlobalVoiceInput();
   const reportedModelSelection = useThreadReportedModelSelection(props.selectedThreadDetailRef);
+  const nativeMetadata = useAtomValue(
+    props.selectedThreadDetailRef === null
+      ? NO_NATIVE_METADATA_ATOM
+      : environmentThreadDetails.threadAtom(props.selectedThreadDetailRef),
+    (thread) =>
+      thread === null ? null : deriveActiveProviderThreadNativeMetadata(thread.projection),
+  );
   const deviceState = useEnvironmentQuery(
     deviceEnvironment.state({ environmentId: props.environmentId, input: {} }),
   );
@@ -511,6 +527,27 @@ function ThreadDetailBody(
   const defaultComposerEditorRef = useRef<ComposerEditorHandle>(null);
   const composerEditorRef = props.draftMode?.editorRef ?? defaultComposerEditorRef;
   const isProviderSubagent = isProviderNativeSubagentThread(props.selectedThread.source);
+  const editorText = nativeMetadata?.editorText;
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- Applies one-shot provider editor updates to the persisted draft and native editor while mounted.
+  useEffect(() => {
+    if (editorText === undefined || isProviderSubagent || props.composerDraftKey === null) return;
+    const draftKey = props.composerDraftKey;
+    const frame = requestAnimationFrame(() => {
+      if (!applyComposerEditorText(draftKey, editorText, selectedThreadKey)) return;
+      composerEditorRef.current?.focus();
+      composerEditorRef.current?.setSelection({
+        start: editorText.text.length,
+        end: editorText.text.length,
+      });
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [
+    editorText,
+    isProviderSubagent,
+    props.composerDraftKey,
+    selectedThreadKey,
+    composerEditorRef,
+  ]);
   const editingRunId = props.queuedRunEdit?.runId ?? null;
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- focuses the composer editor on the next animation frame when a queued run edit starts
   useEffect(() => {
@@ -992,7 +1029,7 @@ function ThreadDetailBody(
   }
   const usageLimitsReport =
     usageLimitsPanel !== null && usageLimitsPanel.key === usageLimitsKey
-      ? collectProviderUsageLimits(
+      ? collectThreadUsageLimits(
           props.selectedThread.modelSelection.instanceId,
           props.serverConfig?.providers ?? [],
           props.serverConfig?.usageLimitSources ?? [],
@@ -1851,6 +1888,15 @@ function ThreadDetailBody(
                     </View>
                   ) : (
                     <>
+                      {nativeMetadata?.statusLines?.map(({ key, text }) => (
+                        <Text
+                          key={key}
+                          accessibilityLabel={text}
+                          className="px-3 font-sans text-xs text-foreground-secondary"
+                        >
+                          {text}
+                        </Text>
+                      ))}
                       <ThreadComposer
                         isDraft={Boolean(props.draftMode)}
                         canOperateThread={props.canOperateThread}

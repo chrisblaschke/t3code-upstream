@@ -124,6 +124,8 @@ export interface ThreadFeedActivity {
   readonly live?: boolean;
   /** Lone calls carry the group header's label and id until a second call joins. */
   readonly groupStandIn?: { readonly groupId: string; readonly label: string };
+  /** Terminal transcript: the row stands alone and shows its output inline. */
+  readonly terminalOutput?: boolean;
   readonly projectedItem: OrchestrationV2ProjectedTurnItem;
 }
 
@@ -194,6 +196,7 @@ type RawThreadFeedEntry =
     };
 
 export type ThreadFeedEntry = ThreadFeedEntryContent & {
+  readonly terminal?: boolean;
   readonly continuesWorkLog?: boolean;
   readonly checkpointSummary?: ThreadCheckpointSummary;
 };
@@ -1323,6 +1326,7 @@ interface ThreadFeedPresentationBuild {
   readonly activeWorkStartedAt: string | null;
   readonly runlessWorkActive: boolean;
   readonly display: ThreadFeedDisplay;
+  readonly terminal: boolean;
   readonly rows: ReadonlyArray<ThreadFeedEntry>;
   /** Feed entry `entry` is a user message whose rows start at `rowsLength`. */
   readonly restarts: ReadonlyArray<{ readonly entry: number; readonly rowsLength: number }>;
@@ -1366,6 +1370,7 @@ function presentationRestart(
   activeWorkStartedAt: string | null,
   runlessWorkActive: boolean,
   display: ThreadFeedDisplay,
+  terminal: boolean,
 ): { readonly entry: number; readonly rowsLength: number; readonly index: number } | null {
   if (
     previous === null ||
@@ -1374,6 +1379,7 @@ function presentationRestart(
     previous.runlessWorkActive !== runlessWorkActive ||
     previous.display.toolCallVisibility !== display.toolCallVisibility ||
     previous.display.revealedMessageId !== display.revealedMessageId ||
+    previous.terminal !== terminal ||
     !setsEqual(previous.expandedRunIds, expandedRunIds) ||
     !setsEqual(previous.expandedWorkGroupIds, expandedWorkGroupIds)
   ) {
@@ -1538,6 +1544,7 @@ export function deriveThreadFeedPresentation(
   runlessWorkActive = false,
   cache?: ThreadFeedCache,
   display: ThreadFeedDisplay = DEFAULT_THREAD_FEED_DISPLAY,
+  terminal = false,
 ): ThreadFeedEntry[] {
   const previous = cache?.presentation ?? null;
   const restart = presentationRestart(
@@ -1549,6 +1556,7 @@ export function deriveThreadFeedPresentation(
     activeWorkStartedAt,
     runlessWorkActive,
     display,
+    terminal,
   );
   const start = restart?.entry ?? 0;
   const result: ThreadFeedEntry[] =
@@ -1633,9 +1641,15 @@ export function deriveThreadFeedPresentation(
       compactionItemRunIds.add(entry.runId);
     }
   }
-  const foldsByAnchorId = zen
-    ? new Map<string, ThreadFeedRunFold>()
-    : deriveThreadFeedRunFolds(sourceFeed, latestRun, isWorking && runlessWorkActive, failedRunIds);
+  const foldsByAnchorId =
+    zen || terminal
+      ? new Map<string, ThreadFeedRunFold>()
+      : deriveThreadFeedRunFolds(
+          sourceFeed,
+          latestRun,
+          isWorking && runlessWorkActive,
+          failedRunIds,
+        );
   const collapsedEntryIds = new Set<string>();
   for (const fold of foldsByAnchorId.values()) {
     if (!expandedRunIds.has(fold.runId)) {
@@ -1712,9 +1726,13 @@ export function deriveThreadFeedPresentation(
                 }));
           failedActivityGroupsCache.set(entry, rows);
         }
-        result.push(...rows);
+        for (const row of rows) {
+          if (!terminal || !appendTerminalFeedEntry(result, row, activeRunId, isWorking))
+            result.push(row);
+        }
         continue;
       }
+      if (terminal && appendTerminalFeedEntry(result, entry, activeRunId, isWorking)) continue;
       appendPresentedFeedEntry(
         result,
         entry,
@@ -1816,6 +1834,7 @@ export function deriveThreadFeedPresentation(
       activeWorkStartedAt,
       runlessWorkActive,
       display,
+      terminal,
       rows: result,
       restarts: cleanRestarts,
       firstEntryByRun,
@@ -1862,6 +1881,58 @@ function thinkingRow(createdAt: string, runId: RunId | null, label: string | nul
   return cachedThinkingRow;
 }
 
+const terminalRowsCache = new WeakMap<ThreadFeedActivity, ThreadFeedActivityGroup>();
+
+/**
+ * Terminal transcript: every visible step is its own feed row (measured and
+ * virtualized by the outer list) instead of a folded tool group. Returns false
+ * for the groups that keep their dedicated presentation.
+ */
+function appendTerminalFeedEntry(
+  result: ThreadFeedEntry[],
+  entry: Exclude<ThreadFeedEntry, { readonly type: "run-fold" | "work-toggle" | "thinking" }>,
+  activeRunId: RunId | null,
+  isWorking: boolean,
+): boolean {
+  if (
+    entry.type !== "activity-group" ||
+    isContextCompactionActivityGroup(entry) ||
+    isContextHandoffActivityGroup(entry) ||
+    isUserInputActivityGroup(entry) ||
+    entry.activities[0]?.projectedItem.item.type === "subagent"
+  ) {
+    return false;
+  }
+  for (const activity of entry.activities) {
+    const live =
+      isWorking && activity.lifecycleStatus === "inProgress" && activity.runId === activeRunId;
+    if (!live && !threadFeedActivityIsVisible(activity)) continue;
+    if (live) {
+      // Live rows change every tick; build them fresh so they are never cached stale.
+      result.push(terminalRow({ ...activity, terminalOutput: true, live: true }));
+      continue;
+    }
+    let row = terminalRowsCache.get(activity);
+    if (!row) {
+      row = terminalRow({ ...activity, terminalOutput: true });
+      terminalRowsCache.set(activity, row);
+    }
+    result.push(row);
+  }
+  return true;
+}
+
+function terminalRow(activity: ThreadFeedActivity): ThreadFeedActivityGroup {
+  return {
+    type: "activity-group",
+    id: activity.id,
+    createdAt: activity.createdAt,
+    runId: activity.runId,
+    activities: [activity],
+    terminal: true,
+  };
+}
+
 function appendPresentedFeedEntry(
   result: ThreadFeedEntry[],
   entry: Exclude<
@@ -1873,7 +1944,7 @@ function appendPresentedFeedEntry(
   isWorking: boolean,
   activeTail: boolean,
 ): void {
-  if (entry.type !== "activity-group") {
+  if (entry.type !== "activity-group" || entry.terminal) {
     result.push(entry);
     return;
   }

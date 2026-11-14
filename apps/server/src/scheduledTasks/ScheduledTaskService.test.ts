@@ -347,6 +347,62 @@ it.effect(
     }).pipe(Effect.provide(SqlitePersistence.layerMemory)),
 );
 
+it.effect.each([
+  { scratch: false, name: "preserves the scheduled Rift branch through storage and launch" },
+  { scratch: true, name: "normalizes a scheduled Rift launch to root in Scratch" },
+])("$name", ({ scratch }) => {
+  let launched: ThreadLaunchService.ThreadLaunchInput | undefined;
+  const layer = ScheduledTaskService.layer.pipe(
+    Layer.provide(
+      Layer.mergeAll(
+        Layer.mock(ThreadLaunchService.ThreadLaunchService)({
+          launch: (input) =>
+            Effect.sync(() => {
+              launched = input;
+            }).pipe(Effect.andThen(Effect.die("stop after inspecting the launch"))),
+        }),
+        Layer.mock(ThreadManagementService.ThreadManagementService)({}),
+        Layer.mock(SecretRequests.SecretRequests)({}),
+        Layer.mock(ManagedProjectFolders.ManagedProjectFolders)({
+          namedProjectsRoot: "/projects",
+          isScratchProject: () => Effect.succeed(scratch),
+        }),
+        NodeCrypto.layer,
+        Scheduler.layer,
+      ),
+    ),
+  );
+  return Effect.gen(function* () {
+    const service = yield* ScheduledTaskService.ScheduledTaskService;
+    const expected = scratch
+      ? ({ type: "root" } as const)
+      : ({ type: "rift", branch: "scheduled-copy" } as const);
+    const { task } = yield* service.upsert({
+      id: ScheduledTaskId.make(`task:rift:${scratch}`),
+      title: "Copy current edits",
+      prompt: "Continue work",
+      enabled: false,
+      schedule: { type: "interval", everyMs: 60_000 },
+      projectId: ProjectId.make("project:test"),
+      workspaceStrategy: { type: "rift", branch: "scheduled-copy" },
+      modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5.4" },
+      runtimeMode: "full-access",
+      interactionMode: "default",
+    });
+    assert.deepEqual(task.workspaceStrategy, expected);
+    assert.deepEqual((yield* service.list()).tasks[0]?.workspaceStrategy, expected);
+    yield* service.runNow({ id: task.id });
+    assert.deepEqual(launched?.workspaceStrategy, expected);
+  }).pipe(
+    Effect.provide(
+      layer.pipe(
+        Layer.provide(ManagedPolicy.layerTest()),
+        Layer.provideMerge(SqlitePersistence.layerMemory),
+      ),
+    ),
+  );
+});
+
 it.effect("thread cleanup notifies subscribers and a finishing run cannot recreate the task", () =>
   Effect.gen(function* () {
     const started = yield* Deferred.make<void>();

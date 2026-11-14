@@ -12,6 +12,7 @@ import {
   type EditorId,
   type FileManagerRevealKind,
   type LaunchEditorInput,
+  type OpenExternalTerminalInput,
 } from "@t3tools/contracts";
 import { resolveEditorCommand } from "@t3tools/shared/editor";
 import * as HostProcess from "@t3tools/shared/HostProcess";
@@ -32,6 +33,7 @@ import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import * as ChildProcess from "effect/process/ChildProcess";
 import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
+import { openKittyTerminal, resolveExternalTerminal } from "./kittyTerminal.ts";
 
 import { makeStaleWhileRevalidate } from "../environment/staleWhileRevalidate.ts";
 export {
@@ -454,6 +456,12 @@ export class ExternalLauncher extends Context.Service<
     readonly resolveFileManagerRevealKind: () => Effect.Effect<FileManagerRevealKind | undefined>;
     readonly launchBrowser: (target: string) => Effect.Effect<void, ExternalLauncherError>;
     readonly launchEditor: (input: LaunchEditorInput) => Effect.Effect<void, ExternalLauncherError>;
+    /** The host terminal app openExternalTerminal uses, if any (kitty on macOS). */
+    readonly resolveExternalTerminal: () => Effect.Effect<"kitty" | undefined>;
+    /** Opens a tab in the host terminal app, optionally running a command. */
+    readonly openExternalTerminal: (
+      input: OpenExternalTerminalInput,
+    ) => Effect.Effect<void, ExternalLauncherError>;
   }
 >()("t3/process/externalLauncher") {}
 
@@ -842,6 +850,14 @@ export const make = Effect.gen(function* () {
         return yield* provideCommandResolutionServices(launchEditor(input));
       },
       Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+    ),
+    resolveExternalTerminal: Effect.fn("ExternalLauncher.resolveExternalTerminal")(() =>
+      provideCommandResolutionServices(resolveExternalTerminal()),
+    ),
+    openExternalTerminal: Effect.fn("ExternalLauncher.openExternalTerminal")((input) =>
+      provideCommandResolutionServices(openKittyTerminal(input)).pipe(
+        Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+      ),
     ),
   });
 });

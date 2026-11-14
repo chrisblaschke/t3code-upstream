@@ -6,6 +6,7 @@ import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 import * as TestClock from "effect/testing/TestClock";
 
@@ -233,4 +234,69 @@ it.effect(
         expect(yield* Deferred.await(launched)).toBe(created.task.title);
       }).pipe(Effect.provide(ScheduledTaskService.layer.pipe(Layer.provide(layerDependencies))));
     }).pipe(Effect.provide(SqlitePersistence.layerMemory)),
+);
+
+it.effect("a fixed-time slot missed by under 12 hours runs once when the server is back", () =>
+  Effect.gen(function* () {
+    const at = (hour: number, minute: number, day: number) =>
+      DateTime.makeZonedUnsafe(
+        { year: 2026, month: 7, day, hour, minute, second: 0, millisecond: 0 },
+        { timeZone: DateTime.zoneMakeLocal(), adjustForTimeZone: true },
+      );
+    const slot = (day: number) => DateTime.formatIso(DateTime.toUtc(at(8, 0, day)));
+    yield* TestClock.setTime(DateTime.toEpochMillis(at(7, 0, 1)));
+    const launches = yield* Ref.make(0);
+    const layerDependencies = Layer.mergeAll(
+      NodeCrypto.layer,
+      Scheduler.layer,
+      ManagedPolicy.layerTest(),
+      Layer.mock(ThreadLaunchService.ThreadLaunchService)({
+        launch: () =>
+          Ref.update(launches, (count) => count + 1).pipe(
+            Effect.as({ threadId: "thread-late-slot", resumed: false } as never),
+          ),
+      }),
+      Layer.mock(ManagedProjectFolders.ManagedProjectFolders)({
+        namedProjectsRoot: "/projects",
+        isScratchProject: () => Effect.succeed(false),
+      }),
+      Layer.mock(ThreadManagementService.ThreadManagementService)({}),
+      Layer.mock(SecretRequests.SecretRequests)({}),
+    );
+    // Each call is one server lifetime over the same database.
+    const serverStart = (upsert: boolean) =>
+      Effect.gen(function* () {
+        const service = yield* ScheduledTaskService.ScheduledTaskService;
+        if (upsert) {
+          yield* service.upsert(
+            yield* decodeUpsertInput({
+              title: "Morning review",
+              prompt: "Run the morning review.",
+              enabled: true,
+              schedule: { type: "fixed_time", timeOfDay: "08:00" },
+              projectId: "project-late-slot",
+              workspaceStrategy: { type: "root" },
+              modelSelection: { instanceId: "codex", model: "gpt-5.4" },
+              runtimeMode: "full-access",
+              interactionMode: "default",
+            }),
+          );
+        }
+        yield* TestClock.adjust("6 seconds");
+        const [task] = (yield* service.list()).tasks;
+        return { nextRunAt: task?.nextRunAt, launches: yield* Ref.get(launches) };
+      }).pipe(Effect.provide(ScheduledTaskService.layer.pipe(Layer.provide(layerDependencies))));
+
+    expect(yield* serverStart(true)).toEqual({ nextRunAt: slot(1), launches: 0 });
+
+    // Off across the 08:00 slot, back at 16:40: the slot runs once.
+    yield* TestClock.setTime(DateTime.toEpochMillis(at(16, 40, 1)));
+    expect(yield* serverStart(false)).toEqual({ nextRunAt: slot(2), launches: 1 });
+    // A restart right after must not run the same slot again.
+    expect(yield* serverStart(false)).toEqual({ nextRunAt: slot(2), launches: 1 });
+
+    // Off across the next slot, back 12.5 hours late: skipped as before.
+    yield* TestClock.setTime(DateTime.toEpochMillis(at(20, 30, 2)));
+    expect(yield* serverStart(false)).toEqual({ nextRunAt: slot(3), launches: 1 });
+  }).pipe(Effect.provide(SqlitePersistence.layerMemory)),
 );

@@ -56,6 +56,7 @@ import * as ThreadManagement from "./ThreadManagementService.ts";
 
 export type ThreadLaunchWorkspaceStrategy =
   | { readonly type: "root"; readonly branch?: string | undefined }
+  | { readonly type: "rift"; readonly branch?: string | undefined }
   | {
       readonly type: "existing_worktree";
       readonly worktreePath: string;
@@ -151,6 +152,9 @@ export class ThreadLaunchError extends Schema.TaggedError<ThreadLaunchError>()(
     return `Thread launch ${this.commandId} failed during ${this.operation}.`;
   }
 }
+
+/** Full commit IDs name immutable commits, unlike branches and short hashes. */
+const FULL_COMMIT_ID = /^[0-9a-f]{40}$/i;
 
 export class ThreadLaunchBaseRefError extends Schema.TaggedError<ThreadLaunchBaseRefError>()(
   "ThreadLaunchBaseRefError",
@@ -277,7 +281,10 @@ const make = Effect.gen(function* () {
   )(function* (input) {
     const strategy = input.workspaceStrategy;
     // launch() turns a Scratch worktree request into a root launch.
-    if (strategy.type !== "worktree" || (yield* managedFolders.isScratchProject(input.projectId)))
+    if (
+      (strategy.type !== "worktree" && strategy.type !== "rift") ||
+      (yield* managedFolders.isScratchProject(input.projectId))
+    )
       return;
     const project = Option.getOrUndefined(
       yield* projects.getById(input.projectId).pipe(Effect.orElseSucceed(() => Option.none())),
@@ -293,6 +300,8 @@ const make = Effect.gen(function* () {
         projectTitle: project.title,
         workspaceRoot: cwd,
       });
+    // Rift copies HEAD without resolving or fetching a base. It still needs a Git project.
+    if (strategy.type === "rift") return;
     // `:/text` is a commit search, which cannot be asked for a commit type.
     if (strategy.baseRef.startsWith(":")) return;
     const { baseRef } = strategy;
@@ -335,7 +344,10 @@ const make = Effect.gen(function* () {
     );
 
     const reused = input.reusedWorktree;
-    const tracked = input.workspaceStrategy.type === "worktree" || reused !== undefined;
+    const tracked =
+      input.workspaceStrategy.type === "worktree" ||
+      input.workspaceStrategy.type === "rift" ||
+      reused !== undefined;
     let createdWorktreePath: string | null = null;
     let createdBranch: string | null = null;
     let setupTerminalId: string | null = null;
@@ -343,11 +355,11 @@ const make = Effect.gen(function* () {
     let runReleased = false;
     // Stop background renames before forgetting worktrees; completed renames record them again.
     let branchRename: Fiber.Fiber<unknown> | null = null;
-    if (input.workspaceStrategy.type === "worktree") {
+    if (input.workspaceStrategy.type === "worktree" || input.workspaceStrategy.type === "rift") {
       yield* setupTracker.begin({
         threadId,
         branch: input.workspaceStrategy.branch ?? null,
-        baseRef: input.workspaceStrategy.baseRef,
+        baseRef: input.workspaceStrategy.type === "rift" ? "HEAD" : input.workspaceStrategy.baseRef,
         stages: ["fetch", "checkout", "setup-script", "agent"],
         fiber: yield* Effect.fiber,
       });
@@ -401,16 +413,59 @@ const make = Effect.gen(function* () {
 
       const requestedBranch = input.workspaceStrategy.branch;
       let branch: string | null;
-      if (input.workspaceStrategy.type === "worktree" && requestedBranch === undefined) {
+      if (
+        (input.workspaceStrategy.type === "worktree" || input.workspaceStrategy.type === "rift") &&
+        requestedBranch === undefined
+      ) {
         const uuid = yield* randomUuidV4;
         branch = buildTemporaryWorktreeBranchName(() => uuid.replaceAll("-", ""));
       } else {
         branch = requestedBranch ?? null;
       }
+      if (
+        (input.workspaceStrategy.type === "worktree" || input.workspaceStrategy.type === "rift") &&
+        branch !== null &&
+        isTemporaryWorktreeBranch(branch) &&
+        (yield* git
+          .hasCommit({
+            cwd: project.workspaceRoot,
+            refName: `refs/heads/${WORKTREE_BRANCH_PREFIX}`,
+          })
+          .pipe(Effect.mapError(mapError(input, "provision-worktree", threadId))))
+      )
+        branch = flattenTemporaryWorktreeBranchName(branch);
       let worktreePath =
         input.workspaceStrategy.type === "existing_worktree"
           ? input.workspaceStrategy.worktreePath
           : null;
+      if (input.workspaceStrategy.type === "rift") {
+        yield* setupTracker.stageStatus(threadId, "fetch", "skipped");
+        yield* setupTracker.stageStatus(threadId, "checkout", "running");
+        const copy = yield* git
+          .createWorktree(
+            {
+              cwd: project.workspaceRoot,
+              refName: "HEAD",
+              newRefName: branch!,
+              path: null,
+              workspaceKind: "rift",
+            },
+            {
+              progress: {
+                onWorktreeClaimed: (path) =>
+                  Effect.sync(() => {
+                    createdWorktreePath = path;
+                  }),
+              },
+            },
+          )
+          .pipe(Effect.mapError(mapError(input, "provision-worktree", threadId)));
+        worktreePath = copy.worktree.path;
+        branch = copy.worktree.refName;
+        createdWorktreePath = worktreePath;
+        yield* setupTracker.update(threadId, (snapshot) => ({ ...snapshot, worktreePath, branch }));
+        yield* setupTracker.stageStatus(threadId, "checkout", "done");
+      }
       if (input.workspaceStrategy.type === "worktree") {
         if (runId !== null) {
           yield* threads
@@ -425,18 +480,34 @@ const make = Effect.gen(function* () {
         }
         let startRef = input.workspaceStrategy.baseRef;
         let baseRefName = input.workspaceStrategy.baseRef;
+        const fullCommit = FULL_COMMIT_ID.test(startRef);
+        const hasBase = () =>
+          git
+            .hasCommit({ cwd: project.workspaceRoot, refName: startRef })
+            .pipe(Effect.orElseSucceed(() => false));
+        const presentCommit = fullCommit && (yield* hasBase());
         const remote =
-          input.workspaceStrategy.startFromOrigin === true
-            ? yield* git
-                .resolveWorktreeBaseRemote({
-                  cwd: project.workspaceRoot,
-                  refName: input.workspaceStrategy.baseRef,
-                })
-                .pipe(Effect.mapError(mapError(input, "provision-worktree", threadId)))
+          !presentCommit && input.workspaceStrategy.startFromOrigin === true
+            ? fullCommit
+              ? (yield* git
+                  .remoteExists({ cwd: project.workspaceRoot, remoteName: "origin" })
+                  .pipe(Effect.mapError(mapError(input, "provision-worktree", threadId))))
+                ? { remoteName: "origin", branchName: startRef }
+                : null
+              : yield* git
+                  .resolveWorktreeBaseRemote({
+                    cwd: project.workspaceRoot,
+                    refName: input.workspaceStrategy.baseRef,
+                  })
+                  .pipe(Effect.mapError(mapError(input, "provision-worktree", threadId)))
             : null;
         const shouldFetch = remote !== null;
         yield* setupTracker.stageStatus(threadId, "fetch", shouldFetch ? "running" : "skipped");
-        if (remote !== null) {
+        if (remote !== null && fullCommit) {
+          yield* git
+            .fetchRemote({ cwd: project.workspaceRoot, remoteName: remote.remoteName })
+            .pipe(Effect.mapError(mapError(input, "provision-worktree", threadId)));
+        } else if (remote !== null) {
           const remoteBase = yield* git
             .fetchWorktreeBaseCommit({
               cwd: project.workspaceRoot,
@@ -450,17 +521,19 @@ const make = Effect.gen(function* () {
           }
         }
         if (shouldFetch) yield* setupTracker.stageStatus(threadId, "fetch", "done");
-        if (
-          branch !== null &&
-          isTemporaryWorktreeBranch(branch) &&
-          (yield* git
-            .hasCommit({
-              cwd: project.workspaceRoot,
-              refName: `refs/heads/${WORKTREE_BRANCH_PREFIX}`,
-            })
-            .pipe(Effect.mapError(mapError(input, "provision-worktree", threadId))))
-        ) {
-          branch = flattenTemporaryWorktreeBranchName(branch);
+        if (fullCommit && !presentCommit && !(yield* hasBase())) {
+          return yield* mapError(
+            input,
+            "provision-worktree",
+            threadId,
+          )(
+            new ThreadLaunchBaseRefError({
+              projectId: project.id,
+              projectTitle: project.title,
+              workspaceRoot: project.workspaceRoot,
+              baseRef: startRef,
+            }),
+          );
         }
         yield* setupTracker.stageStatus(threadId, "checkout", "running");
         const worktree = yield* git
@@ -727,7 +800,8 @@ const make = Effect.gen(function* () {
               .removeWorktree({ cwd: project.workspaceRoot, path: removedPath, force: true })
               .pipe(
                 Effect.andThen(
-                  removedBranch === null
+                  // Rift branches belong to the copy's independent repository, not the source.
+                  removedBranch === null || input.workspaceStrategy.type === "rift"
                     ? Effect.void
                     : git
                         .deleteLocalBranch({
@@ -823,7 +897,9 @@ const make = Effect.gen(function* () {
       const prepare = prepareInBackground(input, threadId, runId);
       if (
         runId === null ||
-        (input.workspaceStrategy.type !== "worktree" && input.reusedWorktree === undefined)
+        (input.workspaceStrategy.type !== "worktree" &&
+          input.workspaceStrategy.type !== "rift" &&
+          input.reusedWorktree === undefined)
       ) {
         return yield* prepare;
       }
@@ -865,7 +941,8 @@ const make = Effect.gen(function* () {
       // Scratch has no Git repository. Normalize before folder allocation so
       // durable preparation and retries use the thread's own Scratch folder.
       const input: ThreadLaunchInput =
-        request.workspaceStrategy.type === "worktree" &&
+        (request.workspaceStrategy.type === "worktree" ||
+          request.workspaceStrategy.type === "rift") &&
         (yield* managedFolders.isScratchProject(request.projectId))
           ? { ...request, workspaceStrategy: { type: "root" } }
           : request;
@@ -1159,7 +1236,7 @@ const make = Effect.gen(function* () {
     });
     const message = messages.find((candidate) => candidate.id === run.userMessageId);
     const reuse =
-      workspacePreparation.type === "worktree" &&
+      (workspacePreparation.type === "worktree" || workspacePreparation.type === "rift") &&
       thread.worktreePath !== null &&
       thread.branch !== null
         ? {
@@ -1168,7 +1245,9 @@ const make = Effect.gen(function* () {
               worktreePath: thread.worktreePath,
               branch: thread.branch,
             },
-            reusedWorktree: { baseRef: workspacePreparation.baseRef },
+            reusedWorktree: {
+              baseRef: workspacePreparation.type === "rift" ? "HEAD" : workspacePreparation.baseRef,
+            },
           }
         : null;
     return yield* schedulePreparation(

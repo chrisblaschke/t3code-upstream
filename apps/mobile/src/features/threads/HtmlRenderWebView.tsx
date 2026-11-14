@@ -1,7 +1,10 @@
 import { AppActivityIndicator } from "../../components/ui/AppActivityIndicator";
 import { useNavigation } from "@react-navigation/native";
-import type { EnvironmentId, ThreadId } from "@t3tools/contracts";
+import { CommandId, MessageId, type EnvironmentId, type ThreadId } from "@t3tools/contracts";
 import {
+  htmlRenderError,
+  htmlRenderResult,
+  readHtmlRenderMessage,
   htmlRenderFileName,
   htmlRenderFrameHeight,
   htmlRenderThemeFragment,
@@ -13,7 +16,10 @@ import { useEffect, useRef, useState } from "react";
 import { Platform, Pressable, View, type ColorValue } from "react-native";
 import { WebView, type WebViewMessageEvent } from "react-native-webview";
 
+import * as Dialog from "../../components/ui/Dialog";
 import { SymbolView } from "../../components/ui/AppSymbol";
+import { uuidv4 } from "../../lib/uuid";
+import { enqueueThreadOutboxMessage } from "../../state/thread-outbox";
 import { AppText as Text } from "../../components/ui/AppText";
 import { mobileHtmlRenderTheme } from "../../lib/htmlRenderTheme";
 import { tryOpenExternalUrl } from "../../lib/openExternalUrl";
@@ -45,6 +51,10 @@ function postTheme(view: WebView<object> | null, theme: HtmlRenderTheme) {
   );
 }
 
+// The page is top-level here, so parent.postMessage is window.postMessage. Route requests
+// directly to native rather than dispatching them locally, where a page could echo them.
+const MESSAGE_BRIDGE_SCRIPT = `(function(){var post=window.postMessage;window.postMessage=function(message){if(message&&message.jsonrpc==="2.0"&&message.method==="ui/message"){window.ReactNativeWebView.postMessage(JSON.stringify(message));return;}return post.apply(window,arguments);};})();true;`;
+
 const OVERFLOW_MESSAGE_TYPE = "t3-html-render-overflow";
 
 const OVERFLOW_SCRIPT = `(function(){var last;function report(){var d=document.documentElement,b=document.body;var x=Math.max(d.scrollWidth,b?b.scrollWidth:0)>window.innerWidth+1,y=Math.max(d.scrollHeight,b?b.scrollHeight:0)>window.innerHeight+1,o=x+","+y;if(o===last)return;last=o;window.ReactNativeWebView.postMessage(JSON.stringify({type:${JSON.stringify(OVERFLOW_MESSAGE_TYPE)},x:x,y:y}));}report();if(window.ResizeObserver){var r=new ResizeObserver(report);r.observe(document.documentElement);if(document.body)r.observe(document.body);}window.addEventListener("resize",report);})();true;`;
@@ -73,11 +83,57 @@ function readOverflowMessage(data: string): Overflow | null {
 
 const withoutFragment = (url: string) => url.split("#", 1)[0];
 
+const confirmSend = (title: string, text: string) =>
+  new Promise<boolean>((resolve) => {
+    Dialog.alert(
+      `Send this message from ${title}?`,
+      text,
+      [
+        { text: "Cancel", style: "cancel", onPress: () => resolve(false) },
+        { text: "Send", onPress: () => resolve(true) },
+      ],
+      { cancelable: true, onDismiss: () => resolve(false) },
+    );
+  });
+
+// Both page transports reach ReactNativeWebView; the confirm shows the text that is sent.
+function relayPageMessage(
+  view: WebView<object> | null,
+  data: string,
+  title: string,
+  send: ((text: string) => Promise<void>) | undefined,
+) {
+  let message: ReturnType<typeof readHtmlRenderMessage>;
+  try {
+    message = readHtmlRenderMessage(JSON.parse(data));
+  } catch {
+    return;
+  }
+  if (message === undefined) return;
+  const { id, text } = message;
+  const reply = (value: unknown) =>
+    view?.injectJavaScript(`window.postMessage(${JSON.stringify(value)}, "*"); true;`);
+  if (send === undefined) {
+    reply(htmlRenderError(id, "This page cannot send messages here."));
+    return;
+  }
+  void confirmSend(title, text)
+    .then(async (approved) => {
+      if (!approved) throw new Error("Declined by the user.");
+      await send(text);
+      reply(htmlRenderResult(id));
+    })
+    .catch((cause: unknown) =>
+      reply(htmlRenderError(id, cause instanceof Error ? cause.message : String(cause))),
+    );
+}
+
 export function HtmlRenderWebView(props: {
   readonly uri: string;
   readonly title: string;
   readonly nested: boolean;
   readonly onLoadError?: () => void;
+  readonly onSendMessage?: (text: string) => Promise<void>;
 }) {
   const theme = useHtmlRenderTheme();
   const [initialTheme] = useState(theme);
@@ -153,10 +209,18 @@ export function HtmlRenderWebView(props: {
         onRenderProcessGone={restart}
         {...(props.nested
           ? {
+              injectedJavaScriptBeforeContentLoaded: MESSAGE_BRIDGE_SCRIPT,
               injectedJavaScript: OVERFLOW_SCRIPT,
               onMessage: (event: WebViewMessageEvent) => {
                 const next = readOverflowMessage(event.nativeEvent.data);
                 if (next !== null) setOverflow(next);
+                else
+                  relayPageMessage(
+                    webView.current,
+                    event.nativeEvent.data,
+                    props.title,
+                    props.onSendMessage,
+                  );
               },
             }
           : {})}
@@ -219,6 +283,19 @@ export function ThreadHtmlRender(props: {
             title={title}
             nested
             onLoadError={handleLoadError}
+            onSendMessage={(text) =>
+              enqueueThreadOutboxMessage({
+                environmentId: props.environmentId,
+                threadId: props.threadId,
+                messageId: MessageId.make(uuidv4()),
+                commandId: CommandId.make(uuidv4()),
+                text,
+                attachments: [],
+                // Like web: an app or page reply steers the running turn, or starts one.
+                dispatchMode: "steer",
+                createdAt: new Date().toISOString(),
+              })
+            }
           />
         ) : failed || asset._tag === "Failure" ? (
           <Pressable

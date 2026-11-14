@@ -11,12 +11,15 @@ import {
   htmlRenderShortcutsMessage,
   htmlRenderThemeFragment,
   htmlRenderThemeMessage,
+  htmlRenderError,
   htmlRenderResult,
   readHtmlRenderContentHeight,
   readHtmlRenderImageRequest,
   readHtmlRenderKeyDown,
   readHtmlRenderLinkRequest,
+  readHtmlRenderMessage,
 } from "@t3tools/shared/htmlRender";
+import { requestConfirmDialog } from "~/confirmDialog";
 import {
   isMacPlatform,
   matchesKeybindingShortcut,
@@ -181,8 +184,12 @@ export function HtmlRenderDocument(props: {
   readonly className?: string;
   readonly threadRef?: ScopedThreadRef | undefined;
   readonly onContentHeight?: (height: number) => void;
+  /** Called before a height change while the reader is in the page, so the timeline holds still. */
+  readonly onReaderResize?: (() => void) | undefined;
   /** Reports fullscreen changes so virtualized rows can stay mounted. */
   readonly onFullscreenChange?: ((fullscreen: boolean) => void) | undefined;
+  /** Sends a page's `ui/message` as the user's message after a confirm; absent means pages cannot send. */
+  readonly onSendMessage?: ((text: string) => Promise<void>) | undefined;
 }) {
   const theme = useHtmlRenderTheme();
   const frameRef = useRef<HTMLIFrameElement>(null);
@@ -277,44 +284,85 @@ export function HtmlRenderDocument(props: {
   // Links, keys and images require frame focus and recent reader activity: a page can take
   // focus by script, so this blocks opens on load, though not a page that waits for the
   // reader's next input.
-  const onFrameMessage = useEffectEvent((frame: HTMLIFrameElement, event: MessageEvent) => {
-    const height = readHtmlRenderContentHeight(event.data);
-    if (height !== undefined) {
-      props.onContentHeight?.(height);
-      return;
-    }
-    if (document.activeElement !== frame || navigator.userActivation?.isActive === false) return;
-    const linkRequest = readHtmlRenderLinkRequest(event.data);
-    if (linkRequest !== undefined) {
-      open(linkRequest.url, linkRequest);
-      frame.contentWindow?.postMessage(htmlRenderResult(linkRequest.id), "*");
-      return;
-    }
-    const key = readHtmlRenderKeyDown(event.data);
-    if (key !== undefined) {
-      if (isShortcut(key)) {
-        frame.dispatchEvent(
-          new KeyboardEvent("keydown", { ...key, bubbles: true, cancelable: true }),
-        );
+  const onFrameMessage = useEffectEvent(
+    (frame: HTMLIFrameElement, event: MessageEvent, isCurrent: () => boolean) => {
+      const height = readHtmlRenderContentHeight(event.data);
+      if (height !== undefined) {
+        if (document.activeElement === frame) props.onReaderResize?.();
+        props.onContentHeight?.(height);
+        return;
       }
-      return;
-    }
-    const imageRequest = readHtmlRenderImageRequest(event.data);
-    if (imageRequest !== undefined) {
-      setExpandedImage({ images: [{ src: imageRequest.src, name: imageRequest.name }], index: 0 });
-    }
-  });
+      if (document.activeElement !== frame || navigator.userActivation?.isActive === false) return;
+      const linkRequest = readHtmlRenderLinkRequest(event.data);
+      if (linkRequest !== undefined) {
+        open(linkRequest.url, linkRequest);
+        frame.contentWindow?.postMessage(htmlRenderResult(linkRequest.id), "*");
+        return;
+      }
+      const key = readHtmlRenderKeyDown(event.data);
+      if (key !== undefined) {
+        if (isShortcut(key)) {
+          frame.dispatchEvent(
+            new KeyboardEvent("keydown", { ...key, bubbles: true, cancelable: true }),
+          );
+        }
+        return;
+      }
+      const imageRequest = readHtmlRenderImageRequest(event.data);
+      if (imageRequest !== undefined) {
+        setExpandedImage({
+          images: [{ src: imageRequest.src, name: imageRequest.name }],
+          index: 0,
+        });
+        return;
+      }
+      const message = readHtmlRenderMessage(event.data);
+      if (message !== undefined) {
+        const reply = (data: unknown) => frame.contentWindow?.postMessage(data, "*");
+        const send = props.onSendMessage;
+        if (send === undefined) {
+          reply(htmlRenderError(message.id, "This page cannot send messages here."));
+          return;
+        }
+        // The page could show one text and send another, so the confirm shows what is sent.
+        const confirmation = requestConfirmDialog(
+          `Send this message from ${props.title}?\n${message.text}`,
+        );
+        if (confirmation === undefined) {
+          reply(htmlRenderError(message.id, "T3 could not ask for confirmation here."));
+          return;
+        }
+        void confirmation
+          .then(async (approved) => {
+            if (!approved) throw new Error("Declined by the user.");
+            if (!isCurrent()) throw new Error("The originating page or thread changed.");
+            await send(message.text);
+            reply(htmlRenderResult(message.id));
+          })
+          .catch((cause: unknown) =>
+            reply(
+              htmlRenderError(message.id, cause instanceof Error ? cause.message : String(cause)),
+            ),
+          );
+      }
+    },
+  );
   // Attach at commit because a fast page may post its initial height before passive effects run.
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- attaches a window message listener for the iframe at commit, before its first height post
   useLayoutEffect(() => {
     const frame = frameRef.current;
     if (frame === null) return;
+    let current = true;
     const onMessage = (event: MessageEvent) => {
-      if (event.source === frame.contentWindow) onFrameMessage(frame, event);
+      if (event.source === frame.contentWindow) onFrameMessage(frame, event, () => current);
     };
     window.addEventListener("message", onMessage);
-    return () => window.removeEventListener("message", onMessage);
-  }, []);
+    return () => {
+      current = false;
+      window.removeEventListener("message", onMessage);
+    };
+    // oxlint-disable-next-line react/exhaustive-effect-dependencies -- Pending confirmations belong to this document and thread, not the next route.
+  }, [props.src, props.threadRef?.environmentId, props.threadRef?.threadId]);
   return (
     <>
       <iframe

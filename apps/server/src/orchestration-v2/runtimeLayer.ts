@@ -14,6 +14,7 @@ import * as TextGeneration from "../textGeneration/TextGeneration.ts";
 import * as ProviderAuthService from "../provider/ProviderAuthService.ts";
 import * as AgentSessionImporter from "../project/AgentSessionImporter.ts";
 import * as AgentSessionScanner from "../project/AgentSessionScanner.ts";
+import * as PiSessionSync from "../project/PiSessionSync.ts";
 import * as ProjectService from "../project/ProjectService.ts";
 import * as ProjectSetupScriptRunner from "../project/ProjectSetupScriptRunner.ts";
 import * as ManagedProjectFolders from "../project/ManagedProjectFolders.ts";
@@ -38,6 +39,7 @@ import * as ProviderAdapterRegistry from "./ProviderAdapterRegistry.ts";
 import * as ProviderContinuationRequests from "@t3tools/provider-core/server/ProviderContinuationRequests";
 import * as ProviderContinuationService from "./ProviderContinuationService.ts";
 import * as ThreadTitleRegenerationService from "./ThreadTitleRegenerationService.ts";
+import * as ThreadTitleFollower from "./ThreadTitleFollower.ts";
 import * as ProviderEventIngestor from "./ProviderEventIngestor.ts";
 import * as ThreadCommandExecutor from "./ThreadCommandExecutor.ts";
 import * as ProviderSessionManager from "./ProviderSessionManager.ts";
@@ -251,6 +253,20 @@ const layerAgentSessionImporterProvided = AgentSessionImporter.layer.pipe(
   ),
 );
 
+const layerPiSessionSyncProvided = PiSessionSync.layer.pipe(
+  Layer.provide(
+    Layer.mergeAll(
+      layerAgentSessionImporterProvided,
+      layerProjectService,
+      layerOrchestratorProvided,
+      layerEventSink,
+      layerProviderSessionManagerProvided,
+      IdAllocator.layer,
+      ProviderSessionRuntime.layer,
+    ),
+  ),
+);
+
 const layerThreadManagementProvided = ThreadManagementService.layerWithLegacyImporter.pipe(
   Layer.provide(
     Layer.mergeAll(
@@ -373,7 +389,14 @@ export const layer = Layer.mergeAll(
 
 export const layerProduction = Layer.mergeAll(
   WorktreeBranchSync.layer.pipe(
-    Layer.provide(Layer.merge(layerThreadManagementProvided, ProjectionStore.layer)),
+    Layer.provide(
+      Layer.mergeAll(
+        layerThreadManagementProvided,
+        ProjectionStore.layer,
+        layerEventSink,
+        ThreadCommandExecutor.layer,
+      ),
+    ),
   ),
   layer.pipe(Layer.provide(layerProjectService)),
   layerProjectService,
@@ -396,6 +419,8 @@ export const layerProduction = Layer.mergeAll(
   ),
   layerProviderContinuationWorkerProvided,
   layerAgentSessionImporterProvided,
+  layerPiSessionSyncProvided,
+  ThreadTitleFollower.layer.pipe(Layer.provide(layerOrchestratorProvided)),
   EffectOutbox.layerPruneWorker.pipe(Layer.provide(EffectOutbox.layer)),
 ).pipe(
   Layer.provide(ResourceCleanupService.layer.pipe(Layer.provide(layerScheduledTaskProvided))),

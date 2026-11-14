@@ -4,7 +4,10 @@ import type {
   ServerProvider,
   UsageLimitSourceSnapshots,
 } from "@t3tools/contracts";
-import { collectProviderUsageLimits, hasProviderUsageLimits } from "@t3tools/shared/usageLimits";
+import {
+  collectThreadUsageLimits,
+  hasThreadUsageLimits,
+} from "@t3tools/client-runtime/state/thread-usage-limits";
 import { useState } from "react";
 import { useStableCallback } from "../../hooks/useStableCallback";
 import { toastManager } from "../ui/toast";
@@ -39,7 +42,7 @@ export function useUsageLimitsPanel(input: {
   }
   const report =
     panel !== null && panelKey !== null && panel.key === panelKey && providerInstanceId !== null
-      ? collectProviderUsageLimits(providerInstanceId, providers, sources, panel.now)
+      ? collectThreadUsageLimits(providerInstanceId, providers, sources, panel.now)
       : null;
   const banner =
     report !== null && panel !== null
@@ -50,13 +53,13 @@ export function useUsageLimitsPanel(input: {
       : null;
   // Intercept /usage-limits only when Limits has selected-provider data.
   const offered =
-    providerDriver !== null && hasProviderUsageLimits(providerDriver, providers, sources);
+    providerDriver !== null && hasThreadUsageLimits(providerDriver, providers, sources);
 
   const open = useStableCallback(() => {
     const now = Date.now();
     const nextReport =
       providerInstanceId !== null && panelKey !== null
-        ? collectProviderUsageLimits(providerInstanceId, providers, sources, now)
+        ? collectThreadUsageLimits(providerInstanceId, providers, sources, now)
         : null;
     if (nextReport && panelKey !== null) {
       setPanel({ key: panelKey, threadKey, now });

@@ -699,8 +699,8 @@ describe("orchestrator MCP toolkit", () => {
           expect(messageReads.length).toBeGreaterThan(0);
           expect(
             messageReads.filter((query) => query.includes("$.notification.source.kind")),
-          ).toHaveLength(1);
-          // The orchestrator's restart-continuation guard still reads its own records.
+          ).toHaveLength(0);
+          // Cohort ownership reads all user notifications once; restart checks use the outbox.
           expect(
             messageReads.filter((query) => !query.includes("$.notification.source.kind")),
           ).toHaveLength(1);

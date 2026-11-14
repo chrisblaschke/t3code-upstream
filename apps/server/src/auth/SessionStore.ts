@@ -425,7 +425,9 @@ export class SessionStore extends Context.Service<
 >()("t3/auth/SessionStore") {}
 
 const SIGNING_SECRET_NAME = "server-signing-key";
-const DEFAULT_SESSION_TTL = Duration.days(30);
+// Fork: upstream's 30 days. A session's expiry is signed into its token and never renewed by
+// use, so every paired app, phone and peer link stopped working a month after pairing.
+const DEFAULT_SESSION_TTL = Duration.days(365);
 const DEFAULT_WEBSOCKET_TOKEN_TTL = Duration.minutes(5);
 
 const SessionClaims = Schema.Struct({

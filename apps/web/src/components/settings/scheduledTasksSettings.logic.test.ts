@@ -25,6 +25,7 @@ import {
   scheduleLabel,
   taskToDraft,
   unbindDraftFromThread,
+  workspaceStrategyFromDraft,
 } from "./scheduledTasksSettings.logic";
 
 const laptopId = EnvironmentId.make("laptop");
@@ -166,6 +167,20 @@ const legacyTask: ScheduledTask = {
 };
 
 describe("editing scheduled task branch settings", () => {
+  it("preserves a Rift branch when saving unrelated edits, but not after changing workspace kind", () => {
+    const original = { type: "rift", branch: "nightly-snapshot" } as const;
+    const draft = taskToDraft({ ...legacyTask, workspaceStrategy: original });
+    expect(
+      workspaceStrategyFromDraft({ ...draft, title: "New title" } as typeof draft, original),
+    ).toEqual(original);
+    expect(workspaceStrategyFromDraft({ ...draft, workspaceMode: "root" }, original)).toEqual({
+      type: "root",
+    });
+    expect(
+      workspaceStrategyFromDraft({ ...draft, workspaceMode: "rift" }, legacyTask.workspaceStrategy),
+    ).toEqual({ type: "rift" });
+  });
+
   it("keeps an omitted origin flag on the local base branch", () => {
     const draft = taskToDraft(legacyTask);
     expect(draft.baseRef).toBe("release");

@@ -106,6 +106,37 @@ const emptyProjection = {
 } as OrchestrationV2ThreadProjection;
 
 describe("applyOrchestrationV2ProjectionEvent", () => {
+  it("reconciles only the branch and ignores a moved workspace", () => {
+    const projection = {
+      ...emptyProjection,
+      thread: {
+        ...emptyProjection.thread,
+        branch: "old-branch",
+        worktreePath: "/repo/worktree",
+        activeProviderThreadId: ProviderThreadId.make("new-provider"),
+      },
+    };
+    const event = {
+      id: "branch-correction" as OrchestrationV2DomainEvent["id"],
+      type: "thread.branch-reconciled" as const,
+      threadId,
+      occurredAt: DateTime.makeUnsafe("2026-06-21T00:00:00.000Z"),
+      payload: {
+        expectedBranch: "old-branch",
+        worktreePath: "/repo/worktree",
+        branch: "new-branch",
+      },
+    };
+    expect(applyOrchestrationV2ProjectionEvent(projection, event)?.thread).toEqual({
+      ...projection.thread,
+      branch: "new-branch",
+    });
+    for (const changed of [{ branch: "user-branch" }, { worktreePath: "/repo/moved" }]) {
+      const moved = { ...projection, thread: { ...projection.thread, ...changed } };
+      expect(applyOrchestrationV2ProjectionEvent(moved, event)).toBe(moved);
+    }
+  });
+
   it("applies a compact PR sync without replacing other links or thread metadata", () => {
     const link = (number: number): ThreadPullRequestLink => ({
       host: "github.com",

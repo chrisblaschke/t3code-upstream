@@ -169,6 +169,10 @@ vi.mock("../state/projects", () => ({
   },
 }));
 vi.mock("../state/server", () => ({ serverEnvironment: {} }));
+vi.mock("../state/preferences", async () => {
+  const { AsyncResult, Atom } = await import("effect/reactivity");
+  return { mobilePreferencesAtom: Atom.make(AsyncResult.success({})) };
+});
 vi.mock("../state/session", () => ({
   readEnvironmentScope: () => true,
   usePreparedConnection: () => ({ _tag: "Some", value: { httpBaseUrl: "https://example.com" } }),

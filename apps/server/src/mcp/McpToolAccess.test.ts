@@ -3,12 +3,14 @@ import {
   EnvironmentId,
   OrchestratorMcpEnvironmentTarget,
   OrchestratorMcpFailure,
+  type OrchestratorMcpEnvironmentLink,
   ProviderInstanceId,
   ProviderInteractionMode,
   RuntimeMode,
   ThreadId,
 } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
@@ -450,6 +452,180 @@ it.effect.each([
   call(tool, scope, args).pipe(
     Effect.map((outcome) => expect(outcome).toBe(expected)),
     Effect.provide(linkedProbeServer),
+  ),
+);
+
+const ThreadReadProbeToolkit = Toolkit.make(Tool.make("t3_thread_read", linkedProbe));
+const localThreadMissing = new OrchestratorMcpFailure({
+  code: "thread_not_found",
+  message: "Thread is no longer available here.",
+});
+const threadReadServer = (
+  forwarding: Partial<PeerForwarding.PeerForwarding["Service"]>,
+  local: Effect.Effect<{ ran: string }, OrchestratorMcpFailure> = Effect.fail(localThreadMissing),
+) =>
+  McpHttpServer.toolkitRegistration(
+    ThreadReadProbeToolkit,
+    McpToolAccess.toLayer(ThreadReadProbeToolkit, {
+      t3_thread_read: McpToolAccess.reads(() => local),
+    }),
+  ).pipe(
+    Layer.provideMerge(McpHttpServer.layerInProcessMcpServer),
+    Layer.provide(Layer.mock(PeerForwarding.PeerForwarding)(forwarding)),
+    Layer.provide(Layer.mock(ThreadManagement.ThreadManagementService)({})),
+  );
+const decodeThreadOutcome = Schema.decodeEffect(
+  Schema.fromJsonString(
+    Schema.Union([
+      Schema.Struct({ ran: Schema.String }),
+      Schema.Struct({ code: Schema.String, message: Schema.String }),
+    ]),
+  ),
+);
+const readThread = (
+  args: Record<string, unknown> = {},
+  scope: McpInvocationContext.McpInvocationScope = supervised,
+) =>
+  McpServer.McpServer.pipe(
+    Effect.flatMap((server) =>
+      server.callTool({
+        name: "t3_thread_read",
+        arguments: { threadId: supervisedThreadId, ...args },
+      }),
+    ),
+    Effect.flatMap(({ content }) =>
+      decodeThreadOutcome(content.map((part) => (part.type === "text" ? part.text : "")).join("")),
+    ),
+    Effect.provideService(McpInvocationContext.McpInvocationContext, scope),
+    Effect.provideService(McpSchema.McpServerClient, mcpClient),
+  );
+const peerLink = (
+  id: string,
+  status: OrchestratorMcpEnvironmentLink["status"] = "reachable",
+): OrchestratorMcpEnvironmentLink => ({
+  environmentId: EnvironmentId.make(id),
+  label: `Machine ${id}`,
+  status,
+  access: "auto",
+  expiresAt: "2099-01-01T00:00:00.000Z",
+  lastError: null,
+});
+const listedLinks = (...links: OrchestratorMcpEnvironmentLink[]) =>
+  Effect.succeed({ environmentId: here, links, notListed: "Link another machine." });
+
+it.effect("finds a bare thread id on a peer without waiting for slower peers", () =>
+  Effect.gen(function* () {
+    const probed = yield* Deferred.make<void>();
+    const result = yield* readThread().pipe(
+      Effect.provide(
+        threadReadServer({
+          links: () => listedLinks(peerLink("slow"), peerLink("missing"), peerLink("found")),
+          call: (_scope, tool, environmentId, args) => {
+            expect(tool.name).toBe("t3_thread_read");
+            expect(args).toEqual({ threadId: supervisedThreadId, environmentId });
+            if (environmentId === "slow") return Effect.never;
+            if (environmentId === "missing") {
+              return Deferred.succeed(probed, undefined).pipe(
+                Effect.andThen(Effect.fail(localThreadMissing)),
+              );
+            }
+            return Deferred.await(probed).pipe(Effect.as({ ran: "found on peer" } as never));
+          },
+        }),
+      ),
+    );
+    expect(result).toEqual({ ran: "found on peer" });
+  }),
+);
+
+it.effect("reports checked peers and peers that could not be checked", () =>
+  readThread().pipe(
+    Effect.provide(
+      threadReadServer({
+        links: () =>
+          listedLinks(peerLink("missing"), peerLink("broken"), peerLink("offline", "unreachable")),
+        call: (_scope, _tool, environmentId) => {
+          expect(environmentId).not.toBe("offline");
+          return Effect.fail(
+            environmentId === "missing"
+              ? localThreadMissing
+              : new OrchestratorMcpFailure({
+                  code: "orchestration_error",
+                  message: "Connection lost",
+                }),
+          );
+        },
+      }),
+    ),
+    Effect.map((result) => {
+      expect(result).toMatchObject({ code: "thread_not_found" });
+      if (!("message" in result)) throw new Error("Expected a missing-thread failure");
+      expect(result.message).toContain("not found here or in the linked environments");
+      expect(result.message).toContain("Checked: Machine missing (missing)");
+      expect(result.message).toContain("Machine broken (broken): Connection lost");
+      expect(result.message).toContain("Machine offline (offline): unreachable");
+    }),
+  ),
+);
+
+it.effect("keeps an explicit local environment local even when the thread is missing", () =>
+  readThread({ environmentId: here }).pipe(
+    Effect.provide(threadReadServer({})),
+    Effect.map((result) => expect(result).toMatchObject({ message: localThreadMissing.message })),
+  ),
+);
+
+it.effect("forwards an explicit peer directly without listing links", () =>
+  readThread({ environmentId: box }).pipe(
+    Effect.provide(
+      threadReadServer({
+        call: (_scope, _tool, environmentId) => {
+          expect(environmentId).toBe(box);
+          return Effect.succeed({ ran: "explicit peer" } as never);
+        },
+      }),
+    ),
+    Effect.map((result) => expect(result).toEqual({ ran: "explicit peer" })),
+  ),
+);
+
+it.effect("keeps the local failure when links cannot be listed", () =>
+  readThread().pipe(
+    Effect.provide(
+      threadReadServer({
+        links: () =>
+          Effect.fail(
+            new OrchestratorMcpFailure({ code: "capability_denied", message: "Cannot list links" }),
+          ),
+      }),
+    ),
+    Effect.map((result) => expect(result).toMatchObject({ message: localThreadMissing.message })),
+  ),
+);
+
+it.effect("does not relay a missing-thread probe received over a full-access peer link", () => {
+  const caller = clientCaller("full-access");
+  return readThread({}, { ...caller, client: { ...caller.client!, linked: true } }).pipe(
+    Effect.provide(
+      threadReadServer({
+        links: () => Effect.die("A forwarded lookup must not fan out again"),
+      }),
+    ),
+    Effect.map((result) => expect(result).toMatchObject({ message: localThreadMissing.message })),
+  );
+});
+
+it.effect("does not probe peers when linked environments are disabled", () =>
+  readThread({}, { ...supervised, linkedEnvironments: false }).pipe(
+    Effect.provide(threadReadServer({})),
+    Effect.map((result) => expect(result).toMatchObject({ message: localThreadMissing.message })),
+  ),
+);
+
+it.effect("does not probe peers when the thread exists locally", () =>
+  readThread().pipe(
+    Effect.provide(threadReadServer({}, Effect.succeed({ ran: "local thread" }))),
+    Effect.map((result) => expect(result).toEqual({ ran: "local thread" })),
   ),
 );
 

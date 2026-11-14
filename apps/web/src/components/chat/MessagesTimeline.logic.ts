@@ -270,6 +270,10 @@ export function workEntryIsVisibleInGroup(
   expandedToolGroupEntry = false,
 ): boolean {
   if (entry.itemType === "reasoning") return Boolean(entry.detail?.trim());
+  // A parent stays visible while any nested call it made is visible.
+  if (workEntryChildEntries(entry).some((child) => workEntryIsVisibleInGroup(child, true))) {
+    return true;
+  }
   return (
     (expandedToolGroupEntry &&
       (entry.toolLifecycleStatus === "inProgress" ||
@@ -278,6 +282,188 @@ export function workEntryIsVisibleInGroup(
     !workEntryIndicatesToolNeutralStatus(entry)
   );
 }
+/**
+ * A work entry with the tool calls it made nested under it (e.g. calls made
+ * inside a Pi codemode script, linked by the child item's `parentItemId`).
+ */
+export type NestedWorkLogEntry = WorkLogEntry & {
+  readonly childEntries?: ReadonlyArray<WorkLogEntry>;
+};
+
+const NO_CHILD_ENTRIES: ReadonlyArray<WorkLogEntry> = [];
+
+export function workEntryChildEntries(entry: WorkLogEntry): ReadonlyArray<WorkLogEntry> {
+  return (entry as NestedWorkLogEntry).childEntries ?? NO_CHILD_ENTRIES;
+}
+
+function workEntryParentItemId(entry: WorkLogEntry): string | null {
+  return (entry.structuredPayload ?? entry.projectedItem?.item)?.parentItemId ?? null;
+}
+
+/** Failure of a parent, or of the last call it made (what a flat list would end on). */
+function workEntryTreeIndicatesFailure(entry: WorkLogEntry): boolean {
+  if (workEntryDisplayIndicatesToolFailure(entry)) return true;
+  const lastChild = workEntryChildEntries(entry).at(-1);
+  return lastChild !== undefined && workEntryTreeIndicatesFailure(lastChild);
+}
+
+/** The innermost running call, so live activity names what is actually running. */
+function liveLeafWorkEntry(entry: WorkLogEntry): WorkLogEntry {
+  const runningChild = workEntryChildEntries(entry).findLast(workEntryIsActiveTurnActivity);
+  return runningChild === undefined ? entry : liveLeafWorkEntry(runningChild);
+}
+
+function workEntryTreeSome(
+  entry: WorkLogEntry,
+  predicate: (entry: WorkLogEntry) => boolean,
+): boolean {
+  return (
+    predicate(entry) ||
+    workEntryChildEntries(entry).some((child) => workEntryTreeSome(child, predicate))
+  );
+}
+
+/** Parent and nested calls flattened, for counts and summaries. */
+function flattenWorkEntryTree(entries: ReadonlyArray<WorkLogEntry>): WorkLogEntry[] {
+  return entries.flatMap((entry) => [entry, ...flattenWorkEntryTree(workEntryChildEntries(entry))]);
+}
+
+/** One row of a work group with its nested calls flattened in, keyed by its own id. */
+export interface FlatWorkEntryRow {
+  readonly id: string;
+  readonly entry: WorkLogEntry;
+  /** Nesting level: 0 for the group's own entries, 1 for calls they made, ... */
+  readonly depth: number;
+}
+
+/**
+ * Parents followed by their visible nested calls, in order, so each call is its
+ * own (virtualizable) list item instead of rendering inside its parent's row.
+ */
+export function flattenVisibleWorkEntryRows(
+  entries: ReadonlyArray<WorkLogEntry>,
+  depth = 0,
+): FlatWorkEntryRow[] {
+  return entries.flatMap((entry) => [
+    { id: entry.id, entry, depth },
+    ...flattenVisibleWorkEntryRows(
+      workEntryChildEntries(entry).filter((child) => workEntryIsVisibleInGroup(child, true)),
+      depth + 1,
+    ),
+  ]);
+}
+
+const nestedWorkEntryCache = new WeakMap<WorkLogEntry, NestedWorkLogEntry>();
+
+function withChildEntries(
+  parent: WorkLogEntry,
+  childEntries: ReadonlyArray<WorkLogEntry>,
+): NestedWorkLogEntry {
+  const cached = nestedWorkEntryCache.get(parent);
+  if (
+    cached?.childEntries !== undefined &&
+    cached.childEntries.length === childEntries.length &&
+    cached.childEntries.every((child, index) => child === childEntries[index])
+  ) {
+    return cached;
+  }
+  const nested: NestedWorkLogEntry = { ...parent, childEntries };
+  nestedWorkEntryCache.set(parent, nested);
+  return nested;
+}
+
+/**
+ * Moves work entries whose `parentItemId` names another work entry of the same
+ * run under that entry, so they render, group and fold with it. Entries whose
+ * parent is not in the timeline (or that would form a cycle) stay flat.
+ */
+export function nestChildWorkEntries(
+  entries: ReadonlyArray<TimelineEntry>,
+): ReadonlyArray<TimelineEntry> {
+  const workById = new Map<string, WorkLogEntry>();
+  for (const entry of entries) {
+    if (entry.kind === "work") workById.set(entry.entry.id, entry.entry);
+  }
+  const parentIdOf = (entry: WorkLogEntry): string | null => {
+    const parentId = workEntryParentItemId(entry);
+    if (
+      parentId === null ||
+      parentId === entry.id ||
+      entry.tone === "error" ||
+      entry.itemType === "error" ||
+      entry.itemType === "approval_request" ||
+      entry.itemType === "compaction" ||
+      entry.itemType === "system_notice" ||
+      entry.itemType === "notification" ||
+      entry.sourceActivityKind === "context-compaction" ||
+      entry.questionAnswer !== undefined
+    ) {
+      return null;
+    }
+    const parent = workById.get(parentId);
+    return parent !== undefined && (parent.runId ?? null) === (entry.runId ?? null)
+      ? parentId
+      : null;
+  };
+  const acyclicById = new Map<string, boolean>();
+  const isAcyclic = (entry: WorkLogEntry): boolean => {
+    // Duplicate IDs can have different parents; only cache the canonical entries.
+    if (workById.get(entry.id) !== entry) {
+      const seen = new Set<string>([entry.id]);
+      let parentId = parentIdOf(entry);
+      while (parentId !== null) {
+        if (seen.has(parentId)) return false;
+        seen.add(parentId);
+        parentId = parentIdOf(workById.get(parentId)!);
+      }
+      return true;
+    }
+    const path: string[] = [];
+    let current = entry;
+    let acyclic: boolean;
+    while (true) {
+      const cached = acyclicById.get(current.id);
+      if (cached !== undefined) {
+        acyclic = cached;
+        break;
+      }
+      // An unfinished path is cyclic if reached again, as are all its descendants.
+      acyclicById.set(current.id, false);
+      path.push(current.id);
+      const parentId = parentIdOf(current);
+      if (parentId === null) {
+        acyclic = true;
+        break;
+      }
+      current = workById.get(parentId)!;
+    }
+    for (const id of path) acyclicById.set(id, acyclic);
+    return acyclic;
+  };
+  const childrenByParentId = new Map<string, WorkLogEntry[]>();
+  const nestedIds = new Set<string>();
+  for (const entry of entries) {
+    if (entry.kind !== "work") continue;
+    const parentId = parentIdOf(entry.entry);
+    if (parentId === null || !isAcyclic(entry.entry)) continue;
+    const siblings = childrenByParentId.get(parentId) ?? [];
+    siblings.push(entry.entry);
+    childrenByParentId.set(parentId, siblings);
+    nestedIds.add(entry.entry.id);
+  }
+  if (nestedIds.size === 0) return entries;
+  const nest = (entry: WorkLogEntry): WorkLogEntry => {
+    const children = childrenByParentId.get(entry.id);
+    return children === undefined ? entry : withChildEntries(entry, children.map(nest));
+  };
+  return entries.flatMap((entry): TimelineEntry[] => {
+    if (entry.kind !== "work") return [entry];
+    if (nestedIds.has(entry.entry.id)) return [];
+    const nested = nest(entry.entry);
+    return nested === entry.entry ? [entry] : [{ ...entry, entry: nested }];
+  });
+}
+
 const TIMELINE_MINIMAP_ITEM_SPACING = 8;
 export const TIMELINE_MINIMAP_MIN_ITEMS = 2;
 // Relative to the timeline, not the viewport, so an open terminal shrinks the rail and
@@ -1150,8 +1336,11 @@ function deriveTurnFolds(input: {
       const isCompaction = timelineEntryIsCompaction(entry);
       const isFoldableTrailingActivity =
         entry.kind === "work" &&
-        entry.entry.toolLifecycleStatus !== "inProgress" &&
-        !workEntryDisplayIndicatesToolFailure(entry.entry);
+        !workEntryTreeSome(
+          entry.entry,
+          (node) =>
+            node.toolLifecycleStatus === "inProgress" || workEntryDisplayIndicatesToolFailure(node),
+        );
       if (!isCompaction && index > terminalEntryIndex && !isFoldableTrailingActivity) {
         continue;
       }
@@ -1336,9 +1525,11 @@ function attachTrailingToolGroupsToAssistant(
 // Hide delegation rows only when task ids identify durable child cards; prompts can repeat.
 function withoutSubagentDelegationRows(entries: ReadonlyArray<TimelineEntry>) {
   const childrenByRun = new Map<RunId, Set<string>>();
+  const replacedRowIds = new Set<string>();
   for (const entry of entries) {
     if (entry.kind !== "event" || entry.projectedItem.item.type !== "subagent") continue;
     const item = entry.projectedItem.item;
+    if (item.parentItemId) replacedRowIds.add(item.parentItemId);
     if (item.origin !== "app_owned" || item.runId === null) continue;
     const children = childrenByRun.get(item.runId) ?? new Set<string>();
     children.add(item.subagentId);
@@ -1347,6 +1538,7 @@ function withoutSubagentDelegationRows(entries: ReadonlyArray<TimelineEntry>) {
   return entries.filter((entry) => {
     if (entry.kind !== "work" || workEntryDisplayIndicatesToolFailure(entry.entry)) return true;
     const item = entry.entry.projectedItem?.item ?? entry.entry.structuredPayload;
+    if (item !== undefined && replacedRowIds.has(item.id)) return false;
     if (
       item?.type !== "dynamic_tool" ||
       item.runId === null ||
@@ -1486,7 +1678,7 @@ function timelineRowEntries(
         entry.kind !== "work" || !workEntryHiddenByToolCallVisibility(entry.entry, visibility),
     );
   }
-  return withoutSubagentDelegationRows(settleSupersededReasoning(shown));
+  return nestChildWorkEntries(withoutSubagentDelegationRows(settleSupersededReasoning(shown)));
 }
 
 function deriveTimelineTurnFolds(
@@ -1540,7 +1732,9 @@ export function deriveMessagesTimelineRows(input: {
   worktreeSetup?: WorktreeSetupSnapshot | null;
   toolCallVisibility?: ToolCallVisibility;
   revealedMessageId?: MessageId | null;
+  terminal?: boolean;
 }): MessagesTimelineRow[] {
+  const terminal = input.terminal === true;
   const timelineEntries = timelineRowEntries(input);
   const embeddedResultRunIds = new Set<RunId>();
   for (const entry of timelineEntries) {
@@ -1593,7 +1787,7 @@ export function deriveMessagesTimelineRows(input: {
   });
   const runlessWorkActive = input.isWorking && input.runlessWorkActive === true;
   const foldsByAnchorEntryId =
-    input.toolCallVisibility === "zen"
+    input.toolCallVisibility === "zen" || terminal
       ? new Map<string, TurnFold>()
       : deriveTurnFolds({
           timelineEntries: timelineEntries,
@@ -1645,7 +1839,7 @@ export function deriveMessagesTimelineRows(input: {
     : timelineEntries.length;
 
   const activeToolEntries: Array<Extract<TimelineEntry, { kind: "work" }>> = [];
-  if (input.isWorking && (unsettledRunId !== null || runlessWorkActive)) {
+  if (!terminal && input.isWorking && (unsettledRunId !== null || runlessWorkActive)) {
     let tailAttemptId: string | null | undefined;
     for (let index = timelineEntries.length - 1; index >= activeTurnHeaderIndex; index -= 1) {
       const entry = timelineEntries[index]!;
@@ -1709,7 +1903,7 @@ export function deriveMessagesTimelineRows(input: {
               ? LIVE_ACTIVITY_ROW_ID
               : `work-live:${activeWorkAnchor.id}`,
             createdAt: activeWorkAnchor.createdAt,
-            entry: (latestRunningToolEntry ?? latestVisibleToolEntry).entry,
+            entry: liveLeafWorkEntry((latestRunningToolEntry ?? latestVisibleToolEntry).entry),
             groupedEntries: visibleActiveToolEntries.map((entry) => entry.entry),
             groupId,
             expanded: input.expandedWorkGroupIds?.has(groupId) ?? false,
@@ -1977,6 +2171,7 @@ export function deriveMessagesTimelineRows(input: {
       const groupedEntries = [timelineEntry.entry];
       let cursor = index + 1;
       while (cursor < timelineEntries.length) {
+        if (terminal) break;
         const nextEntry = timelineEntries[cursor];
         if (
           !nextEntry ||
@@ -2011,13 +2206,13 @@ export function deriveMessagesTimelineRows(input: {
         const activeInProgressToolEntries = visibleGroupedEntries.filter(workEntryIsInActiveRun);
         if (activeInProgressToolEntries.length > 0) {
           const groupId = workGroupId(timelineEntry.id);
-          const expanded = input.expandedWorkGroupIds?.has(groupId) ?? false;
+          const expanded = terminal || (input.expandedWorkGroupIds?.has(groupId) ?? false);
           const latestActiveToolEntry = activeInProgressToolEntries.at(-1)!;
           nextRows.push({
             kind: "work-live",
             id: `work-live:${timelineEntry.id}`,
             createdAt: timelineEntry.createdAt,
-            entry: latestActiveToolEntry,
+            entry: liveLeafWorkEntry(latestActiveToolEntry),
             groupedEntries: visibleGroupedEntries,
             groupId,
             expanded,
@@ -2031,7 +2226,8 @@ export function deriveMessagesTimelineRows(input: {
           }
         } else if (
           visibleGroupedEntries.length === 1 &&
-          workLogEntryIsToolLike(visibleGroupedEntries[0]!)
+          (terminal || workEntryChildEntries(visibleGroupedEntries[0]!).length === 0) &&
+          (terminal || workLogEntryIsToolLike(visibleGroupedEntries[0]!))
         ) {
           const singleEntry = visibleGroupedEntries[0]!;
           nextRows.push({
@@ -2040,15 +2236,20 @@ export function deriveMessagesTimelineRows(input: {
             createdAt: timelineEntry.createdAt,
             groupedEntries: visibleGroupedEntries,
             isExpandedToolGroup: false,
-            displayLabel:
-              toolGroupAction(singleEntry) === "edit"
-                ? summarizeToolGroup(visibleGroupedEntries).summary
-                : singleToolCallLabel(singleEntry),
+            ...(workLogEntryIsToolLike(singleEntry)
+              ? {
+                  displayLabel:
+                    toolGroupAction(singleEntry) === "edit"
+                      ? summarizeToolGroup(visibleGroupedEntries).summary
+                      : singleToolCallLabel(singleEntry),
+                }
+              : {}),
           });
         } else {
           const groupId = workGroupId(timelineEntry.id);
           const expanded = input.expandedWorkGroupIds?.has(groupId) ?? false;
-          const summaryKind = toolGroupSummaryKind(visibleGroupedEntries);
+          const summaryEntries = flattenWorkEntryTree(visibleGroupedEntries);
+          const summaryKind = toolGroupSummaryKind(summaryEntries);
           const primarySourceEntry = visibleGroupedEntries.find(
             (entry) => entry.toolSource !== undefined,
           );
@@ -2066,26 +2267,24 @@ export function deriveMessagesTimelineRows(input: {
             primarySourceIcon ??
             visibleGroupedEntries.findLast((entry) => entry.toolIcon !== undefined)?.toolIcon;
           const latestToolEntry = visibleGroupedEntries.findLast(workLogEntryIsToolLike);
-          const singleEntry =
-            visibleGroupedEntries.length === 1 ? (visibleGroupedEntries[0] ?? null) : null;
+          const singleEntry = summaryEntries.length === 1 ? (summaryEntries[0] ?? null) : null;
           nextRows.push({
             kind: "work-toggle",
             id: `work-toggle:${timelineEntry.id}`,
             createdAt: timelineEntry.createdAt,
             runId: timelineEntry.entry.runId ?? null,
             groupId,
-            hiddenCount: visibleGroupedEntries.length,
+            hiddenCount: summaryEntries.length,
             expanded,
             summary:
               singleEntry !== null && !workLogEntryIsToolLike(singleEntry)
                 ? singleEntry.label
-                : summarizeToolGroup(visibleGroupedEntries).summary,
+                : summarizeToolGroup(summaryEntries).summary,
             summaryKind,
             ...(groupToolSurface ? { toolSurface: groupToolSurface } : {}),
             ...(groupToolIcon ? { toolIcon: groupToolIcon } : {}),
             hasFailure:
-              latestToolEntry !== undefined &&
-              workEntryDisplayIndicatesToolFailure(latestToolEntry),
+              latestToolEntry !== undefined && workEntryTreeIndicatesFailure(latestToolEntry),
           });
           if (expanded) {
             nextRows.push(

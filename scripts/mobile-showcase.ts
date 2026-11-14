@@ -10,6 +10,7 @@ import * as NodeProcess from "node:process";
 import * as NodeURL from "node:url";
 
 import { PNG } from "pngjs";
+import { loadRepoEnv } from "./lib/public-config.ts";
 
 import showcaseConfig, {
   type ShowcaseAppearance,
@@ -33,6 +34,13 @@ import {
 const REPO_ROOT = NodePath.resolve(NodePath.dirname(NodeURL.fileURLToPath(import.meta.url)), "..");
 const MOBILE_ROOT = NodePath.join(REPO_ROOT, "apps/mobile");
 const ANDROID_PACKAGE = "com.t3tools.t3code";
+// Capture builds force the production variant; use app.config.ts's repo-env
+// precedence and personal-team override for their iOS identifier.
+const repoEnv = loadRepoEnv();
+const IOS_BUNDLE_ID =
+  (repoEnv.T3CODE_IOS_PERSONAL_TEAM === "1"
+    ? repoEnv.T3CODE_IOS_PERSONAL_TEAM_BUNDLE_ID?.trim()
+    : repoEnv.T3CODE_IOS_BUNDLE_ID?.trim()) || "com.t3tools.t3code";
 const APP_SCHEME = "t3code";
 // Manifest flags update expo-dev-launcher preferences before loading, hiding dev chrome in captures.
 const DEV_CLIENT_LAUNCH_FLAGS = "disableOnboarding=1&disableFab=1&disableAutoLaunch=1";
@@ -977,7 +985,7 @@ async function ensureIosFullScreenAppsMode(udid: string): Promise<void> {
 
 async function iosAppContainer(udid: string): Promise<string> {
   return (
-    await commandOutput("xcrun", ["simctl", "get_app_container", udid, ANDROID_PACKAGE, "data"])
+    await commandOutput("xcrun", ["simctl", "get_app_container", udid, IOS_BUNDLE_ID, "data"])
   ).trim();
 }
 
@@ -1058,7 +1066,7 @@ async function presentIosLockScreen(udid: string): Promise<void> {
   await new Promise<void>((resolve, reject) => {
     const child = NodeChildProcess.execFile(
       "xcrun",
-      ["simctl", "push", udid, ANDROID_PACKAGE, "-"],
+      ["simctl", "push", udid, IOS_BUNDLE_ID, "-"],
       { cwd: REPO_ROOT },
       (error) => (error ? reject(error) : resolve()),
     );
@@ -1153,7 +1161,7 @@ async function captureIos(
   }
   await normalizeIosSimulator(capture.appearance, simulator.udid);
   if (appPath) {
-    await runCommand("xcrun", ["simctl", "uninstall", simulator.udid, ANDROID_PACKAGE]).catch(
+    await runCommand("xcrun", ["simctl", "uninstall", simulator.udid, IOS_BUNDLE_ID]).catch(
       () => undefined,
     );
     await runCommand("xcrun", ["simctl", "install", simulator.udid, appPath]);
@@ -1176,7 +1184,7 @@ async function captureIos(
       "launch",
       ...(terminateRunningProcess ? ["--terminate-running-process"] : []),
       simulator.udid,
-      ANDROID_PACKAGE,
+      IOS_BUNDLE_ID,
       "--initialUrl",
       metroUrl,
       "--showcasePairingUrl",

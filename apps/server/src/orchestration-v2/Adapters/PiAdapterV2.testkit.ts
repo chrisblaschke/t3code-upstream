@@ -416,6 +416,12 @@ export const PiOrchestratorReplayHarness: OrchestratorV2ProviderReplayHarness<
       scenario: transcript.scenario,
       binaryPath: "pi",
       launchArgs: metadataString(transcript, "launchArgs"),
+      // The adapter reads Pi's settings (default model, compaction reserve)
+      // from the agent dir; an empty one keeps replay independent of the
+      // machine's own ~/.pi/agent.
+      environment: [
+        { name: "PI_CODING_AGENT_DIR", value: "/nonexistent/t3-pi-replay-agent", sensitive: false },
+      ],
       spawner: Layer.effect(
         ChildProcessSpawner.ChildProcessSpawner,
         Effect.gen(function* () {

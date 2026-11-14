@@ -759,12 +759,17 @@ export const make = Effect.gen(function* () {
       );
       for (const providerThread of projection.providerThreads ?? []) {
         const needsIdle = providerThread.status === "active";
-        const needsRosterClear = providerThreadHasPendingBackgroundTasks(providerThread);
+        const needsRosterClear =
+          providerThreadHasPendingBackgroundTasks(providerThread) ||
+          (providerThread.pendingBackgroundTaskWakes?.length ?? 0) > 0;
         if (!needsIdle && !needsRosterClear) {
           continue;
         }
         if (providerThread.ownerNodeId === null) {
-          for (const task of providerThread.pendingBackgroundTasks ?? []) {
+          for (const task of [
+            ...(providerThread.pendingBackgroundTasks ?? []),
+            ...(providerThread.pendingBackgroundTaskWakes ?? []),
+          ]) {
             // A subagent already recorded covers the shells it started.
             if (
               cancelledBackgroundNativeIds.has(task.taskId) ||
@@ -787,6 +792,7 @@ export const make = Effect.gen(function* () {
             ...providerThread,
             status: needsIdle ? "idle" : providerThread.status,
             pendingBackgroundTasks: [],
+            pendingBackgroundTaskWakes: [],
             updatedAt: now,
           },
         });

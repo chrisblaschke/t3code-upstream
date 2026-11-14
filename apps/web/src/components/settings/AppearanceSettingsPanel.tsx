@@ -324,6 +324,41 @@ export function AppearanceSettingsPanel() {
           }
         />
         <SettingsRow
+          {...searchableSetting("transcript-mode")}
+          description="Terminal lists every step with its output inline, as the Pi terminal does. Compact folds finished work."
+          resetAction={
+            settings.transcriptMode !== DEFAULT_UNIFIED_SETTINGS.transcriptMode ? (
+              <SettingResetButton
+                label="transcript"
+                onClick={() =>
+                  updateSettings({ transcriptMode: DEFAULT_UNIFIED_SETTINGS.transcriptMode })
+                }
+              />
+            ) : null
+          }
+          control={
+            <div className="w-full sm:w-40">
+              <Select
+                value={settings.transcriptMode}
+                onValueChange={(value) => {
+                  if (value === "compact" || value === "terminal")
+                    updateSettings({ transcriptMode: value });
+                }}
+              >
+                <SelectTrigger size="sm" className="w-full min-w-0" aria-label="Transcript">
+                  <SelectValue>
+                    {settings.transcriptMode === "terminal" ? "Terminal" : "Compact"}
+                  </SelectValue>
+                </SelectTrigger>
+                <SelectPopup align="end" alignItemWithTrigger={false}>
+                  <SelectItem value="terminal">Terminal</SelectItem>
+                  <SelectItem value="compact">Compact</SelectItem>
+                </SelectPopup>
+              </Select>
+            </div>
+          }
+        />
+        <SettingsRow
           {...searchableSetting("math-rendering")}
           description="Typeset LaTeX math, such as $x^2$ or \[x^2\], in messages and Markdown previews. The composer keeps TeX source editable."
           resetAction={

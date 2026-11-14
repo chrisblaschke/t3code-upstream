@@ -100,8 +100,10 @@ const browserTestApiPort = 61_000 + ((Hash.string(import.meta.dirname) >>> 0) % 
 
 const browserTestProject = {
   extends: true,
-  // Pre-bundle lazy browser and worker dependencies to avoid mid-run reloads.
+  // Scan the tests as entry points so full-app fixtures do not discover dependencies mid-run.
+  // Explicit includes cover lazy browser and worker dependencies the scan cannot see.
   optimizeDeps: {
+    entries: ["src/**/*.browser.test.{ts,tsx}"],
     include: [
       "vite-plus/test/browser",
       "@base-ui/react/autocomplete",

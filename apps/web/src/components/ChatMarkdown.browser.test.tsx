@@ -547,6 +547,24 @@ describe("ChatMarkdown inline code selection", () => {
     await userEvent.dblClick(fenced, { position: { x: 4, y: 4 } });
     expect(window.getSelection()?.toString()).toBe("fenced");
   });
+
+  it("copies inline code on a plain click, but not when the click ends a selection", async () => {
+    setup();
+    await using screen = await renderText("Run `migration-gate --dry-run` first.");
+    const writeText = vi.spyOn(navigator.clipboard, "writeText").mockResolvedValue();
+    const code = screen.getByText("migration-gate --dry-run");
+
+    // A drag ends in a click with the selection still there; a real click would clear it first.
+    window.getSelection()?.selectAllChildren(code.element());
+    code.element().dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    expect(writeText).not.toHaveBeenCalled();
+
+    window.getSelection()?.removeAllRanges();
+    await userEvent.click(code);
+    expect(writeText).toHaveBeenCalledWith("migration-gate --dry-run");
+    await expect.element(code).toHaveAttribute("data-copied");
+    writeText.mockRestore();
+  });
 });
 
 describe("ChatMarkdown file chip tooltips", () => {

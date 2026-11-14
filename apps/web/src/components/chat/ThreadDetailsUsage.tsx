@@ -5,7 +5,6 @@ import type {
   UsageLimitSourceSnapshots,
 } from "@t3tools/contracts";
 import {
-  collectProviderUsageLimits,
   formatDuration,
   type LimitPace,
   limitsNotice,
@@ -23,6 +22,7 @@ import { formatUpcomingTimestamp } from "../../timestampFormat";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { formatContextWindowCompactionMessage } from "./compaction.logic";
 import { ThreadDetailsSection } from "./ThreadDetailsSection";
+import { threadDetailsLimits } from "@t3tools/client-runtime/state/thread-usage-limits";
 
 const PACE_LABEL: Record<LimitPace, string> = {
   ahead: "Ahead of pace",
@@ -35,6 +35,7 @@ export interface ThreadDetailsUsageInput {
   readonly providers: readonly ServerProvider[];
   readonly sources: UsageLimitSourceSnapshots;
   readonly contextWindow: ContextWindowSnapshot | null;
+  readonly model?: string | null | undefined;
 }
 
 type UsageTone = "error" | "warning" | null;
@@ -44,18 +45,14 @@ export function ThreadDetailsUsage({
   providerInstanceId,
   providers,
   sources,
+  model,
 }: Omit<ThreadDetailsUsageInput, "contextWindow">) {
   const nowMinute = useNowMinute();
   const now = Date.parse(`${nowMinute}:00Z`);
-  const report =
-    providerInstanceId !== null
-      ? collectProviderUsageLimits(providerInstanceId, providers, sources, now)
-      : null;
-  // Only this instance's data: the report keeps one instance per login, and any other entry may be
-  // a different login or workspace, so fall back to the instance's own snapshot.
   const limits =
-    report?.accounts.find((entry) => entry.instanceId === providerInstanceId)?.limits ??
-    providers.find((provider) => provider.instanceId === providerInstanceId)?.usageLimits;
+    providerInstanceId !== null
+      ? threadDetailsLimits(providerInstanceId, providers, sources, now, model)
+      : undefined;
   if (!limits) return null;
   const notice = limitsNotice(limits);
 

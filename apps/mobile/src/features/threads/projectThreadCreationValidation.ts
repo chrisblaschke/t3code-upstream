@@ -1,5 +1,5 @@
 export function resolveProjectThreadCreationBranch(input: {
-  readonly workspaceMode: "local" | "worktree";
+  readonly workspaceMode: "local" | "worktree" | "rift";
   readonly selectedBranch: string | null;
   readonly currentCheckoutBranch: string | null;
 }): string | null {

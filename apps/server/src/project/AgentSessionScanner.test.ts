@@ -577,6 +577,134 @@ it.layer(NodeServices.layer)("AgentSessionScanner", (it) => {
       }),
     );
 
+    it.effect(
+      "shares Pi discovery within a sync batch and refreshes on new batches or settings",
+      () =>
+        Effect.gen(function* () {
+          const fs = yield* FileSystem.FileSystem;
+          const path = yield* Path.Path;
+          yield* TestClock.setTime(Date.parse("2026-01-01T00:00:01.000Z"));
+          const claudeHome = yield* makeTempDir("t3code-cache-claude-");
+          const codexHome = yield* makeTempDir("t3code-cache-codex-");
+          const piHome = yield* makeTempDir("t3code-cache-pi-");
+          const nextPiHome = yield* makeTempDir("t3code-cache-pi-next-");
+          const projectA = yield* makeTempDir("t3code-cache-project-a-");
+          const projectB = yield* makeTempDir("t3code-cache-project-b-");
+          yield* fs.makeDirectory(path.join(claudeHome, "projects"));
+          const writePi = (home: string, cwd: string, id = "cli") =>
+            writeTranscript({
+              filePath: path.join(home, `${id}.jsonl`),
+              contents: [
+                { type: "session", version: 3, id, cwd },
+                {
+                  type: "message",
+                  id: "u1",
+                  parentId: null,
+                  timestamp: "2026-01-01T00:00:00.000Z",
+                  message: { role: "user", content: "Hello" },
+                },
+              ]
+                .map((entry) => JSON.stringify(entry))
+                .join("\n"),
+              mtimeMs: Date.parse("2026-01-01T00:00:00.000Z"),
+            });
+          yield* writePi(piHome, projectA);
+          yield* writePi(nextPiHome, projectB);
+          let claudeScans = 0;
+          const settingsLayer = ServerSettings.layerTest({
+            providerInstances: {
+              [ProviderInstanceId.make("claudeAgent")]: {
+                driver: ProviderDriverKind.make("claudeAgent"),
+                config: { homePath: claudeHome },
+              },
+              [ProviderInstanceId.make("codex")]: {
+                driver: ProviderDriverKind.make("codex"),
+                config: { homePath: codexHome },
+              },
+              [ProviderInstanceId.make("pi")]: {
+                driver: ProviderDriverKind.make("pi"),
+                enabled: true,
+                config: {},
+                environment: [
+                  { name: "PI_CODING_AGENT_SESSION_DIR", value: piHome, sensitive: false },
+                ],
+              },
+            },
+          });
+          yield* Effect.gen(function* () {
+            const scanner = yield* AgentSessionScanner.AgentSessionScanner;
+            const settings = yield* ServerSettings.ServerSettingsService;
+            let discoveryBatch = Date.parse("2026-01-01T00:00:01.000Z");
+            const recent = (cwd: string) =>
+              scanner
+                .recentThreads(cwd, [], new Set(), ["pi"], discoveryBatch)
+                .pipe(Stream.runCollect);
+            expect((yield* recent(projectA)).some((outcome) => outcome._tag === "Importable")).toBe(
+              true,
+            );
+            expect(yield* recent(projectB)).toEqual([]);
+            expect(claudeScans).toBe(1);
+            // The sole file event for a new session arrives inside the five-second TTL.
+            yield* writePi(piHome, projectB, "new-cli");
+            yield* TestClock.adjust("1 second");
+            discoveryBatch += 1000;
+            expect(
+              (yield* recent(projectB)).some(
+                (outcome) =>
+                  outcome._tag === "Importable" && outcome.thread.providerSessionId === "new-cli",
+              ),
+            ).toBe(true);
+            yield* recent(projectA);
+            expect(claudeScans).toBe(2);
+            const current = yield* settings.getSettings;
+            yield* settings.updateSettings({
+              providerInstances: {
+                ...current.providerInstances,
+                [ProviderInstanceId.make("pi")]: {
+                  driver: ProviderDriverKind.make("pi"),
+                  enabled: true,
+                  config: {},
+                  environment: [
+                    { name: "PI_CODING_AGENT_SESSION_DIR", value: nextPiHome, sensitive: false },
+                  ],
+                },
+              },
+            });
+            expect((yield* recent(projectB)).some((outcome) => outcome._tag === "Importable")).toBe(
+              true,
+            );
+            expect(claudeScans).toBe(3);
+            yield* recent(projectA);
+            expect(claudeScans).toBe(3);
+            yield* TestClock.adjust("6 seconds");
+            yield* recent(projectA);
+            expect(claudeScans).toBe(4);
+          }).pipe(
+            Effect.provide(
+              Layer.mergeAll(
+                settingsLayer,
+                AgentSessionScanner.layer.pipe(
+                  Layer.provide(
+                    Layer.mergeAll(
+                      settingsLayer,
+                      ServerConfig.layerTest(claudeHome, { prefix: "t3code-cache-config-" }),
+                      layerProjectStore([]),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+            Effect.provideService(FileSystem.FileSystem, {
+              ...fs,
+              readDirectory: (dir, options) => {
+                if (dir === path.join(claudeHome, "projects")) claudeScans++;
+                return fs.readDirectory(dir, options);
+              },
+            }),
+          );
+        }),
+    );
+
     it.effect("scans each distinct home across multiple instances once", () =>
       Effect.gen(function* () {
         const path = yield* Path.Path;
@@ -986,11 +1114,15 @@ it.layer(NodeServices.layer)("AgentSessionScanner", (it) => {
         const path = yield* Path.Path;
         const claudeHomePath = yield* makeTempDir("t3code-claude-home-");
         const codexHomePath = yield* makeTempDir("t3code-codex-home-");
-        const configBaseDir = yield* makeTempDir("t3code-scanner-base-");
+        const realBaseDir = yield* makeTempDir("t3code-scanner-base-");
         const linkParent = yield* makeTempDir("t3code-scanner-links-");
         const fileSystem = yield* FileSystem.FileSystem;
+        // Force different configured and canonical root spellings on every OS,
+        // not just macOS where temporary paths pass through /var -> /private/var.
+        const configBaseDir = path.join(linkParent, "config");
+        yield* fileSystem.symlink(realBaseDir, configBaseDir);
 
-        const worktreeCwd = path.join(configBaseDir, "worktrees", "t3code", "wt-3");
+        const worktreeCwd = path.join(realBaseDir, "worktrees", "t3code", "wt-3");
         yield* fileSystem.makeDirectory(worktreeCwd, { recursive: true });
         const symlinkCwd = path.join(linkParent, "innocent-project");
         yield* fileSystem.symlink(worktreeCwd, symlinkCwd);
@@ -2238,6 +2370,113 @@ it.layer(NodeServices.layer)("AgentSessionScanner", (it) => {
         expect(threads.map((thread) => thread.providerInstanceId)).toEqual(["codex-work"]);
       }),
     );
+
+    it.effect("imports Pi CLI sessions but not the sessions T3 threads own", () =>
+      Effect.gen(function* () {
+        const path = yield* Path.Path;
+        const nowMs = Date.parse("2026-08-24T12:00:00.000Z");
+        yield* TestClock.setTime(nowMs);
+        const claudeHomePath = yield* makeTempDir("t3code-claude-home-");
+        const codexHomePath = yield* makeTempDir("t3code-codex-home-");
+        const piAgentDir = yield* makeTempDir("t3code-pi-agent-");
+        const workspace = yield* makeTempDir("t3code-workspace-");
+        const sessions = path.join(piAgentDir, "sessions", "--workspace--");
+        const piSession = (id: string, prompt: string, parentSession?: string) =>
+          [
+            {
+              type: "session",
+              version: 3,
+              id,
+              cwd: workspace,
+              ...(parentSession ? { parentSession } : {}),
+            },
+            {
+              type: "message",
+              id: `${id}-u`,
+              parentId: null,
+              message: { role: "user", content: prompt },
+            },
+          ]
+            .map((record) => encodeTranscriptRecord(record))
+            .join("\n");
+        const cliFile = path.join(sessions, "2026-08-24_cli.jsonl");
+        const t3Original = path.join(sessions, "2026-08-24_t3.jsonl");
+        const t3Rewound = path.join(sessions, "2026-08-24_t3-fork.jsonl");
+        yield* writeTranscript({
+          filePath: cliFile,
+          contents: piSession("cli", "From the terminal"),
+          mtimeMs: nowMs,
+        });
+        yield* writeTranscript({
+          filePath: t3Original,
+          contents: piSession("t3", "From T3"),
+          mtimeMs: nowMs,
+        });
+        yield* writeTranscript({
+          filePath: t3Rewound,
+          contents: piSession("t3-fork", "From T3", t3Original),
+          mtimeMs: nowMs,
+        });
+
+        const fs = yield* FileSystem.FileSystem;
+        let boundOpens = 0;
+        const outcomes = yield* Effect.gen(function* () {
+          const scanner = yield* AgentSessionScanner.AgentSessionScanner;
+          const outcomes = yield* scanner
+            .recentThreads(workspace, [], new Set([t3Rewound]))
+            .pipe(Stream.runCollect);
+          const initialOpens = boundOpens;
+          expect(initialOpens).toBeGreaterThan(0);
+          yield* scanner
+            .recentThreads(`${workspace}/other`, [], new Set([t3Rewound]))
+            .pipe(Stream.runCollect);
+          expect(boundOpens).toBe(initialOpens);
+          // A rewritten header must not retain stale ancestry.
+          yield* writeTranscript({
+            filePath: t3Rewound,
+            contents: piSession("t3-fork", "From T3"),
+            mtimeMs: nowMs + 1,
+          });
+          yield* scanner
+            .recentThreads(`${workspace}/other`, [], new Set([t3Rewound]))
+            .pipe(Stream.runCollect);
+          expect(boundOpens).toBe(initialOpens + 1);
+          return outcomes;
+        }).pipe(
+          Effect.provide(
+            layerScannerTest({
+              claudeHomePath,
+              codexHomePath,
+              providerInstances: {
+                [ProviderInstanceId.make("pi")]: {
+                  driver: ProviderDriverKind.make("pi"),
+                  enabled: true,
+                  environment: [
+                    { name: "PI_CODING_AGENT_DIR", value: piAgentDir, sensitive: false },
+                  ],
+                  config: {},
+                },
+              },
+            }),
+          ),
+          Effect.provideService(FileSystem.FileSystem, {
+            ...fs,
+            open: (filePath, options) => {
+              if (filePath === t3Rewound) boundOpens++;
+              return fs.open(filePath, options);
+            },
+          }),
+        );
+
+        expect(
+          Array.from(outcomes).flatMap((outcome) =>
+            outcome._tag === "Importable"
+              ? [[outcome.source.filePath, outcome.thread.providerSessionId]]
+              : [],
+          ),
+        ).toEqual([[cliFile, "cli"]]);
+      }),
+    );
   });
 });
 
@@ -2518,6 +2757,160 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")(
 );
 
 describe("parseAgentSessionTranscript", () => {
+  it("imports the active branch of a Pi session tree", () => {
+    const thread = AgentSessionScanner.parseAgentSessionTranscript({
+      contents: [
+        { type: "session", version: 3, id: "pi-session", cwd: "/project" },
+        { type: "model_change", id: "m", parentId: null, provider: "anthropic", modelId: "x" },
+        {
+          type: "message",
+          id: "u1",
+          parentId: "m",
+          message: { role: "user", content: [{ type: "text", text: "Plan it" }] },
+        },
+        {
+          type: "message",
+          id: "a1",
+          parentId: "u1",
+          message: {
+            role: "assistant",
+            content: [
+              { type: "thinking", thinking: "hidden" },
+              { type: "text", text: "Plan ready" },
+              { type: "toolCall", name: "read" },
+            ],
+          },
+        },
+        {
+          type: "message",
+          id: "t1",
+          parentId: "a1",
+          message: { role: "toolResult", content: [{ type: "text", text: "file" }] },
+        },
+        {
+          type: "message",
+          id: "u2",
+          parentId: "t1",
+          message: { role: "user", content: "Abandoned idea" },
+        },
+        {
+          type: "model_change",
+          id: "abandoned-model",
+          parentId: "u2",
+          provider: "openai",
+          modelId: "abandoned",
+        },
+        {
+          type: "message",
+          id: "u3",
+          parentId: "a1",
+          message: { role: "user", content: "Build it" },
+        },
+        { type: "session_info", id: "n", parentId: "u3", name: "Build the plan" },
+      ]
+        .map((record) => JSON.stringify(record))
+        .join("\n"),
+      source: "pi",
+      providerInstanceId: ProviderInstanceId.make("pi"),
+      fallbackSessionId: "2026-08-24T10-00-00-000Z_pi-session",
+      lastActiveAtMs: Date.parse("2026-08-24T12:00:00.000Z"),
+    });
+
+    expect(thread).toMatchObject({
+      providerSessionId: "pi-session",
+      title: "Build the plan",
+      model: "anthropic/x",
+      nativeHeadId: "n",
+    });
+    expect(thread?.messages.map((message) => [message.role, message.text])).toEqual([
+      ["user", "Plan it"],
+      ["assistant", "Plan ready"],
+      ["user", "Build it"],
+    ]);
+  });
+
+  it.each([
+    {
+      name: "a saved model change before another turn",
+      entries: [
+        { type: "model_change", id: "m", parentId: "u", provider: "anthropic", modelId: "x" },
+      ],
+      model: "anthropic/x",
+    },
+    {
+      name: "an assistant model without a model change, preserving slashes",
+      entries: [
+        {
+          type: "message",
+          id: "a",
+          parentId: "u",
+          message: {
+            role: "assistant",
+            provider: "openrouter",
+            model: "google/gemini",
+            content: "Done",
+          },
+        },
+      ],
+      model: "openrouter/google/gemini",
+    },
+    {
+      name: "an assistant model overriding an earlier model change without visible text",
+      entries: [
+        { type: "model_change", id: "m", parentId: "u", provider: "anthropic", modelId: "old" },
+        {
+          type: "message",
+          id: "a",
+          parentId: "m",
+          message: { role: "assistant", provider: "openai", model: "new", content: [] },
+        },
+      ],
+      model: "openai/new",
+    },
+    {
+      name: "a model change after the last assistant reply",
+      entries: [
+        {
+          type: "message",
+          id: "a",
+          parentId: "u",
+          message: { role: "assistant", provider: "openai", model: "old", content: "Done" },
+        },
+        { type: "model_change", id: "m", parentId: "a", provider: "anthropic", modelId: "new" },
+      ],
+      model: "anthropic/new",
+    },
+    {
+      name: "incomplete model metadata not replacing the last saved model",
+      entries: [
+        { type: "model_change", id: "m", parentId: "u", provider: "anthropic", modelId: "x" },
+        { type: "model_change", id: "bad", parentId: "m", provider: " ", modelId: "bad" },
+        {
+          type: "message",
+          id: "a",
+          parentId: "bad",
+          message: { role: "assistant", provider: "openai", content: "Done" },
+        },
+      ],
+      model: "anthropic/x",
+    },
+  ])("retains the Pi model from $name", ({ entries, model }) => {
+    const thread = AgentSessionScanner.parseAgentSessionTranscript({
+      contents: [
+        { type: "session", version: 3, id: "pi-model", cwd: "/project" },
+        { type: "message", id: "u", parentId: null, message: { role: "user", content: "Hi" } },
+        ...entries,
+      ]
+        .map((record) => JSON.stringify(record))
+        .join("\n"),
+      source: "pi",
+      providerInstanceId: ProviderInstanceId.make("pi"),
+      fallbackSessionId: "unused",
+      lastActiveAtMs: Date.parse("2026-08-24T12:00:00.000Z"),
+    });
+    expect(thread?.model).toBe(model);
+  });
+
   it.each([false, true])(
     "handles the exact record limit and an interior blank overflow=%s",
     (overflow) => {
@@ -3078,5 +3471,108 @@ describe("parseAgentSessionTranscript", () => {
     });
 
     expect(thread).toBeNull();
+  });
+});
+
+describe("Pi session titles", () => {
+  it("skips a bare opening skill when naming the thread", () => {
+    const thread = AgentSessionScanner.parseAgentSessionTranscript({
+      contents: [
+        { type: "session", version: 3, id: "pi-session", cwd: "/project" },
+        {
+          type: "message",
+          id: "u1",
+          parentId: null,
+          message: {
+            role: "user",
+            content: '<skill name="recall" location="/skills/recall/SKILL.md">\nBody\n</skill>',
+          },
+        },
+        {
+          type: "message",
+          id: "a1",
+          parentId: "u1",
+          message: { role: "assistant", content: "Loaded" },
+        },
+        {
+          type: "message",
+          id: "u2",
+          parentId: "a1",
+          message: { role: "user", content: "Fix the build" },
+        },
+      ]
+        .map((record) => JSON.stringify(record))
+        .join("\n"),
+      source: "pi",
+      providerInstanceId: ProviderInstanceId.make("pi"),
+      fallbackSessionId: "pi-session",
+      lastActiveAtMs: Date.parse("2026-08-24T12:00:00.000Z"),
+    });
+    expect(thread?.title).toBe("Fix the build");
+    expect(thread?.messages[0]?.text).toBe("/skill:recall");
+  });
+});
+
+describe("piMessagesAfterHead", () => {
+  const contents = [
+    { type: "session", version: 3, id: "s", cwd: "/project" },
+    { type: "message", id: "u1", parentId: null, message: { role: "user", content: "One" } },
+    {
+      type: "message",
+      id: "a1",
+      parentId: "u1",
+      message: { role: "assistant", content: [{ type: "text", text: "Two" }] },
+    },
+    {
+      type: "message",
+      id: "u2",
+      parentId: "a1",
+      timestamp: "2026-09-01T10:00:00.000Z",
+      message: { role: "user", content: "Three" },
+    },
+    {
+      type: "message",
+      id: "t2",
+      parentId: "u2",
+      message: { role: "toolResult", content: "ignored" },
+    },
+  ]
+    .map((record) => JSON.stringify(record))
+    .join("\n");
+
+  it("returns the messages the CLI added after the known head", () => {
+    expect(
+      AgentSessionScanner.piMessagesAfterHead(contents, "a1", "2026-09-02T00:00:00.000Z"),
+    ).toEqual({
+      leafId: "t2",
+      messages: [{ id: "u2", role: "user", text: "Three", createdAt: "2026-09-01T10:00:00.000Z" }],
+    });
+  });
+
+  it("shows a skill invocation the way the user typed it", () => {
+    const skill = JSON.stringify({
+      type: "message",
+      id: "u4",
+      parentId: "t2",
+      message: {
+        role: "user",
+        content:
+          '<skill name="recall" location="/skills/recall/SKILL.md">\nLong skill body\n</skill>\n\nfind the plan',
+      },
+    });
+    expect(
+      AgentSessionScanner.piMessagesAfterHead(
+        `${contents}\n${skill}`,
+        "t2",
+        "2026-09-02T00:00:00.000Z",
+      )?.messages.map((message) => message.text),
+    ).toEqual(["/skill:recall find the plan"]);
+  });
+
+  it("refuses to guess when the head left the active branch", () => {
+    const rewound = `${contents}\n${JSON.stringify({ type: "message", id: "u3", parentId: "u1", message: { role: "user", content: "Redo" } })}`;
+    expect(
+      AgentSessionScanner.piMessagesAfterHead(rewound, "a1", "2026-09-02T00:00:00.000Z"),
+    ).toBeNull();
   });
 });

@@ -158,9 +158,13 @@ export interface EventSinkV2Shape {
     },
     EventSinkV2Error
   >;
-  /** Commits only if the full provider row equals expected; some writers do not advance updatedAt. */
+  /**
+   * Commit only if the whole provider-thread row still equals `expected`;
+   * not every writer moves `updatedAt`. `requireActive` also checks selection.
+   */
   readonly writeIfProviderThreadUnchanged: (input: {
     readonly expected: OrchestrationV2ProviderThread;
+    readonly requireActive?: boolean;
     readonly events: ReadonlyArray<OrchestrationV2DomainEvent>;
   }) => Effect.Effect<
     {
@@ -656,6 +660,20 @@ const layerBase: Layer.Layer<
               committed: false as const,
               storedEvents: [] as ReadonlyArray<OrchestrationV2StoredEvent>,
             };
+          }
+          if (input.requireActive) {
+            const threads = yield* sql<{ readonly active_provider_thread_id: string | null }>`
+              SELECT active_provider_thread_id
+              FROM orchestration_v2_projection_threads
+              WHERE thread_id = ${input.expected.appThreadId}
+              LIMIT 1
+            `;
+            if (threads[0]?.active_provider_thread_id !== input.expected.id) {
+              return {
+                committed: false as const,
+                storedEvents: [] as ReadonlyArray<OrchestrationV2StoredEvent>,
+              };
+            }
           }
 
           const normalized = yield* normalizeEvents(input.events);

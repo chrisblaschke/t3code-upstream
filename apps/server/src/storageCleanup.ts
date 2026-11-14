@@ -840,15 +840,18 @@ const make = Effect.gen(function* () {
     }
     const worktreePathReason = Effect.fn("StorageCleanup.worktreePathReason")(function* (
       worktreePath: string,
+      isRift: boolean,
     ) {
       // Allow symlinked parents, never a symlinked worktree directory.
       const realPath = yield* fs.realPath(worktreePath);
       const realParent = yield* fs.realPath(path.dirname(worktreePath));
       if (realPath !== path.join(realParent, path.basename(worktreePath)))
         return "worktree is a symbolic link";
-      if (!roots.some((root) => inside(root, realPath)))
+      if (!isRift && !roots.some((root) => inside(root, realPath)))
         return "outside the managed worktree folder";
-      if ((yield* fs.stat(path.join(worktreePath, ".git"))).type !== "File")
+      if (
+        (yield* fs.stat(path.join(worktreePath, ".git"))).type !== (isRift ? "Directory" : "File")
+      )
         return "not a linked worktree";
       return null;
     });
@@ -950,6 +953,17 @@ const make = Effect.gen(function* () {
         if (group.some((member) => member.branch !== thread.branch))
           return keep("a subagent thread's branch differs from this worktree's branch");
         if (hasTerminal(worktreePath)) return keep(waitForStop("open terminal"));
+        const gitMetadata = yield* fs.stat(path.join(worktreePath, ".git"));
+        // Independent repos need registry proof, not merely a managed-folder path.
+        const isRift =
+          gitMetadata.type === "Directory" &&
+          (yield* git.listWorktreePaths(project.workspaceRoot)).some(
+            (entry) => path.resolve(entry) === worktreePath,
+          );
+        if (isRift && !deleted)
+          return keep(
+            "rift copies are retained until thread deletion; their independent branches cannot be recreated from the project root",
+          );
         if (
           [...group, ...settlementChain.slice(1)].some(
             (member) =>
@@ -993,7 +1007,7 @@ const make = Effect.gen(function* () {
         // Only Git-based rules can make a not-yet-due worktree eligible, so skip Git otherwise.
         if (!eligible && !settings.worktreeUnchanged && !settings.worktreeOnMerge)
           return keep(notDueReason);
-        const pathReason = yield* worktreePathReason(worktreePath);
+        const pathReason = yield* worktreePathReason(worktreePath, isRift);
         if (pathReason !== null) return keep(pathReason);
         if (yield* containsProjectRoot(worktreePath, [project, ...snapshot.projects]))
           return keep("contains a project checkout");
@@ -1193,7 +1207,7 @@ const make = Effect.gen(function* () {
         yield* withWorkspaceLease(
           worktreePath,
           Effect.gen(function* () {
-            const pathReason = yield* worktreePathReason(worktreePath);
+            const pathReason = yield* worktreePathReason(worktreePath, isRift);
             if (pathReason !== null) return keep(pathReason);
             const blockedWhileMeasuring = yield* blockedSinceCheck();
             if (blockedWhileMeasuring !== null) return keep(blockedWhileMeasuring);
@@ -1219,24 +1233,38 @@ const make = Effect.gen(function* () {
             )
               return keep("settings changed since check");
             // Clean only untracked files. Ordinary worktrees retain Git's final tracked-edit check.
-            if (settings.worktreeKeepWhen === "tracked-changes")
+            if (!isRift && settings.worktreeKeepWhen === "tracked-changes")
               yield* cleanupGit(worktreePath, ["clean", "-ffdx"], "git clean");
-            const submodules = yield* submoduleRemoval(worktreePath, settings);
-            if (submodules.reason !== null) return keep(submodules.reason);
-            if (submodules.force) {
-              const changes = yield* localChangesReason(worktreePath, settings);
-              if (changes !== null) return keep(changes);
+            if (isRift) {
+              yield* git.removeWorktree({ cwd: project.workspaceRoot, path: worktreePath });
+            } else {
+              const submodules = yield* submoduleRemoval(worktreePath, settings);
+              if (submodules.reason !== null) return keep(submodules.reason);
+              if (submodules.force) {
+                const changes = yield* localChangesReason(worktreePath, settings);
+                if (changes !== null) return keep(changes);
+              }
+              yield* removeLinkedWorktree({
+                operation: "StorageCleanup.cleanupGit",
+                cwd: project.workspaceRoot,
+                worktreePath,
+                // Git requires force for submodules; recursive checks above cannot make removal atomic.
+                force: submodules.force,
+                execute: git.execute,
+                run: (args) => cleanupGit(project.workspaceRoot, [...args], "git worktree remove"),
+              });
             }
-            yield* removeLinkedWorktree({
-              operation: "StorageCleanup.cleanupGit",
-              cwd: project.workspaceRoot,
-              worktreePath,
-              // Git requires force for submodules; recursive checks above cannot make removal atomic.
-              force: submodules.force,
-              execute: git.execute,
-              run: (args) => cleanupGit(project.workspaceRoot, [...args], "git worktree remove"),
+            // Rift remove retains the copy in trash; do not claim reclaimed storage.
+            entries.push({
+              ...entry,
+              outcome: "removed",
+              reason: sentence(
+                isRift
+                  ? `${removalReason}; retained in Rift trash until manual rift gc`
+                  : removalReason,
+              ),
+              bytes: isRift ? 0 : bytes,
             });
-            entries.push({ ...entry, outcome: "removed", reason: sentence(removalReason), bytes });
             yield* gitManager.invalidateStatus(project.workspaceRoot);
             // Preserve branch/path so ProviderTurnStartService can recreate the checkout on resume.
             yield* Effect.logInfo("storage cleanup removed worktree", { threadId: thread.id });

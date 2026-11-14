@@ -758,6 +758,7 @@ export const makeMuseAdapterV2 = Effect.fn("makeMuseAdapterV2")(function* (
             return [
               {
                 taskId: item ? backgroundTaskId(item) : itemId,
+                ...(owner.input.runId == null ? {} : { originRunId: owner.input.runId }),
                 kind:
                   item?.kind === "subagent" ? ("subagent" as const) : ("background_task" as const),
                 ...(description ? { description } : {}),
@@ -788,6 +789,7 @@ export const makeMuseAdapterV2 = Effect.fn("makeMuseAdapterV2")(function* (
           else if (observedChildren.delete(item.itemId) && active !== turn)
             finishedBackground.push({
               kind: item.kind === "subagent" ? "subagent" : "background_task",
+              ...(turn.input.runId == null ? {} : { originRunId: turn.input.runId }),
               label: item.objective ?? item.entryId ?? item.fallbackText,
               outcome:
                 status === "completed"
