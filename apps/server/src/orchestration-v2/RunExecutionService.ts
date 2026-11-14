@@ -963,9 +963,56 @@ export const layer: Layer.Layer<
           Effect.catchCause((cause) =>
             Cause.hasInterruptsOnly(cause)
               ? Effect.interrupt
-              : Effect.logWarning(
-                  "orchestration V2 checkpoint baseline capture failed; starting provider without a baseline",
-                  { runId: input.run.id },
+              : Effect.gen(function* () {
+                  yield* Effect.logWarning(
+                    "orchestration V2 checkpoint baseline capture failed; starting provider without a baseline",
+                    { runId: input.run.id, cause },
+                  );
+                  const now = yield* DateTime.now;
+                  yield* eventSink.write({
+                    events: [
+                      {
+                        id: yield* idAllocator.allocate.event({ threadId: input.run.threadId }),
+                        type: "turn-item.updated",
+                        threadId: input.run.threadId,
+                        runId: input.run.id,
+                        providerInstanceId: input.run.providerInstanceId,
+                        occurredAt: now,
+                        payload: {
+                          id: idAllocator.derive.runSignalTurnItem({
+                            runId: input.run.id,
+                            signal: "checkpoint-baseline-failed",
+                          }),
+                          threadId: input.run.threadId,
+                          runId: input.run.id,
+                          nodeId: input.run.rootNodeId,
+                          providerThreadId: null,
+                          providerTurnId: null,
+                          nativeItemRef: null,
+                          parentItemId: null,
+                          // EventSink allocates the position before provider output starts.
+                          ordinal: 0,
+                          status: "completed",
+                          title: "Checkpoint unavailable",
+                          startedAt: now,
+                          completedAt: now,
+                          updatedAt: now,
+                          type: "system_notice",
+                          message:
+                            "Could not capture this turn's starting files. Restoring files to the start of this turn may be unavailable.",
+                        },
+                      },
+                    ],
+                  });
+                }).pipe(
+                  Effect.catchCause((noticeCause) =>
+                    Cause.hasInterruptsOnly(noticeCause)
+                      ? Effect.interrupt
+                      : Effect.logWarning("Could not record the checkpoint baseline failure", {
+                          runId: input.run.id,
+                          cause: noticeCause,
+                        }),
+                  ),
                 ),
           ),
         );
