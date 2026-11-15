@@ -37,6 +37,8 @@ import * as ProviderSessionManager from "./orchestration-v2/ProviderSessionManag
 import * as ProjectStore from "./orchestration-v2/ProjectStore.ts";
 import * as Orchestrator from "./orchestration-v2/Orchestrator.ts";
 import * as ThreadManagement from "./orchestration-v2/ThreadManagementService.ts";
+import * as ThreadCommandExecutor from "./orchestration-v2/ThreadCommandExecutor.ts";
+import * as EventSink from "./orchestration-v2/EventSink.ts";
 import * as TerminalManager from "./terminal/Manager.ts";
 import { CodexProviderCapabilitiesV2 } from "./orchestration-v2/Adapters/CodexAdapterV2.ts";
 import { ServerActivation } from "./serverActivation.ts";
@@ -53,7 +55,6 @@ import {
   RuntimeRequestId,
   ThreadId,
   type OrchestrationV2DomainEvent,
-  type OrchestrationV2ServerCommand,
   type OrchestrationV2ThreadShell,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
@@ -442,19 +443,29 @@ const cleanupFixture = (
             threads: threads.filter((thread) => input?.threadIds?.includes(thread.id) ?? true),
             archivedThreads: [],
           })),
-        dispatch: (command: OrchestrationV2ServerCommand) =>
-          Effect.sync(() => {
-            if (command.type === "thread.metadata.update" && command.branch != null) {
-              const branch = command.branch;
-              threads = threads.map((thread) =>
-                thread.id === command.threadId && thread.branch === command.expectedBranch
-                  ? { ...thread, branch }
-                  : thread,
-              );
-            }
-            return { sequence: 0, storedEvents: [] };
-          }),
       } as unknown as ThreadManagement.ThreadManagementService["Service"]),
+      Effect.provide(
+        Layer.merge(
+          Layer.mock(EventSink.EventSinkV2)({
+            write: ({ events }) =>
+              Effect.sync(() => {
+                for (const event of events) {
+                  if (event.type !== "thread.branch-reconciled") continue;
+                  threads = threads.map((thread) =>
+                    thread.id === event.threadId &&
+                    thread.branch === event.payload.expectedBranch &&
+                    thread.worktreePath === event.payload.worktreePath &&
+                    thread.deletedAt === null
+                      ? { ...thread, branch: event.payload.branch }
+                      : thread,
+                  );
+                }
+                return [];
+              }),
+          }),
+          ThreadCommandExecutor.layer,
+        ),
+      ),
       Effect.provideService(GitWorkflowService.GitWorkflowService, {
         currentBranch: (cwd: string) =>
           command(cwd, ["branch", "--show-current"]).pipe(

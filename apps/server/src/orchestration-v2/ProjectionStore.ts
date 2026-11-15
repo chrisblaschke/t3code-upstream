@@ -1,5 +1,9 @@
 import type { ProjectThreadAwarenessV2Input } from "@t3tools/shared/agentAwareness";
-import { applyOrchestrationV2ThreadVisit, pendingGuestMessageCount } from "@t3tools/contracts";
+import {
+  applyOrchestrationV2ThreadBranchReconciliation,
+  applyOrchestrationV2ThreadVisit,
+  pendingGuestMessageCount,
+} from "@t3tools/contracts";
 import { applyThreadPullRequestLinkUpdate } from "../sourceControl/threadPullRequests.ts";
 import { projectTurnItemForWire } from "./WireProjection.ts";
 import * as Stream from "effect/Stream";
@@ -957,6 +961,11 @@ export function applyToProjection(
       return {
         ...projection,
         thread: event.payload,
+      };
+    case "thread.branch-reconciled":
+      return {
+        ...projection,
+        thread: applyOrchestrationV2ThreadBranchReconciliation(projection.thread, event.payload),
       };
     case "thread.visit-recorded":
       return {
@@ -2300,6 +2309,14 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
               });
               break;
             }
+            case "thread.branch-reconciled": {
+              const thread = yield* getThread(event.threadId);
+              const updated = applyOrchestrationV2ThreadBranchReconciliation(thread, event.payload);
+              if (updated !== thread) {
+                yield* apply({ ...event, type: "thread.metadata-updated", payload: updated });
+              }
+              break;
+            }
             case "thread.visit-recorded": {
               const thread = yield* getThread(event.threadId);
               yield* apply({
@@ -3142,6 +3159,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
             event.type !== "thread.tags-updated" &&
             event.type !== "thread.visited" &&
             event.type !== "thread.visit-recorded" &&
+            event.type !== "thread.branch-reconciled" &&
             event.type !== "thread.marked-unread" &&
             event.type !== "thread.metadata-updated" &&
             event.type !== "thread.pull-request-synced" &&

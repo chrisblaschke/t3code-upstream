@@ -1,5 +1,6 @@
 import { applyThreadPullRequestLinkUpdate } from "../threadPullRequests.ts";
 import {
+  applyOrchestrationV2ThreadBranchReconciliation,
   applyOrchestrationV2ThreadVisit,
   isQueuedProviderThreadPlaceholder,
 } from "@t3tools/contracts";
@@ -325,6 +326,11 @@ export function applyOrchestrationV2ProjectionEvent(
     case "thread.tags-updated":
     case "thread.marked-unread":
       return { ...projection, thread: event.payload };
+    case "thread.branch-reconciled":
+      return {
+        ...projection,
+        thread: applyOrchestrationV2ThreadBranchReconciliation(projection.thread, event.payload),
+      };
     case "thread.visit-recorded":
       return {
         ...projection,

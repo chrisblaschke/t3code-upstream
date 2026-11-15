@@ -1,5 +1,6 @@
-import { CommandId } from "@t3tools/contracts";
+import { EventId } from "@t3tools/contracts";
 import { randomUuidV4 } from "@t3tools/provider-core/server/randomUuid";
+import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
@@ -8,11 +9,15 @@ import * as Stream from "effect/Stream";
 import * as GitWorkflowService from "../git/GitWorkflowService.ts";
 import { forkParked } from "../serverActivation.ts";
 import * as VcsStatusBroadcaster from "../vcs/VcsStatusBroadcaster.ts";
+import * as EventSink from "./EventSink.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
+import * as ThreadCommandExecutor from "./ThreadCommandExecutor.ts";
 import * as ThreadManagement from "./ThreadManagementService.ts";
 
 export const makeReconcile = Effect.gen(function* () {
   const threads = yield* ThreadManagement.ThreadManagementService;
+  const eventSink = yield* EventSink.EventSinkV2;
+  const commands = yield* ThreadCommandExecutor.ThreadCommandExecutor;
   const git = yield* GitWorkflowService.GitWorkflowService;
   const projections = yield* ProjectionStore.ProjectionStoreV2;
   const fs = yield* FileSystem.FileSystem;
@@ -45,18 +50,26 @@ export const makeReconcile = Effect.gen(function* () {
     // Status events may queue behind a generated rename or another checkout.
     if ((yield* git.currentBranch(input.cwd)) !== input.refName) return;
     for (const thread of sharing) {
-      yield* threads
-        .dispatch({
-          type: "thread.metadata.update",
-          commandId: CommandId.make(yield* randomUuidV4),
-          threadId: thread.id,
-          branch: input.refName,
-          expectedBranch: thread.branch,
-          expectedWorktreePath: thread.worktreePath,
+      yield* eventSink
+        .write({
+          events: [
+            {
+              id: EventId.make(yield* randomUuidV4),
+              type: "thread.branch-reconciled",
+              threadId: thread.id,
+              occurredAt: yield* DateTime.now,
+              payload: {
+                branch: input.refName,
+                expectedBranch: thread.branch,
+                worktreePath: thread.worktreePath!,
+              },
+            },
+          ],
         })
         .pipe(
+          (write) => commands.withLock(thread.id, write),
           Effect.catchTags({
-            OrchestratorDispatchError: (cause) =>
+            EventSinkWriteError: (cause) =>
               Effect.logWarning("Worktree branch update was rejected", {
                 threadId: thread.id,
                 cause,

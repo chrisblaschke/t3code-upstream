@@ -181,6 +181,119 @@ describe("ThreadPullRequestServiceV2 reads", () => {
     }),
   );
 
+  it.effect("clears a settled thread's previous branch PR after branch reconciliation", () =>
+    Effect.gen(function* () {
+      const previousPullRequest = {
+        projectId: ProjectId.make("project-1"),
+        repository: "acme/project",
+        number: 42,
+        url: "https://github.com/acme/project/pull/42",
+      };
+      const thread = {
+        ...threadShell("renamed-branch-thread"),
+        branch: "renamed",
+        worktreePath: "/workspace/worktree",
+        settledAt: NOW,
+        branchPullRequest: previousPullRequest,
+      };
+      const project: OrchestrationProjectShell = {
+        id: thread.projectId,
+        title: "Project",
+        workspaceRoot: "/workspace/project",
+        defaultModelSelection: null,
+        scripts: [],
+        createdAt: "2026-08-01T00:00:00.000Z",
+        updatedAt: "2026-08-01T00:00:00.000Z",
+      };
+      const activation = yield* Deferred.make<void>();
+      const sweepStarted = yield* Deferred.make<void>();
+      const reconcile = yield* Deferred.make<void>();
+      const processed = yield* Deferred.make<void>();
+      const commands: Array<OrchestrationV2ServerCommand> = [];
+      const event: OrchestrationV2DomainEvent = {
+        id: EventId.make("branch-reconciled"),
+        type: "thread.branch-reconciled",
+        threadId: thread.id,
+        occurredAt: NOW,
+        payload: {
+          branch: thread.branch,
+          expectedBranch: "previous",
+          worktreePath: thread.worktreePath,
+        },
+      };
+      const dependencies = Layer.mergeAll(
+        Layer.mock(Orchestrator.OrchestratorV2)({
+          streamDomainEvents: Stream.fromEffect(Deferred.await(reconcile)).pipe(
+            Stream.map(() => event),
+            Stream.concat(
+              Stream.fromEffect(Deferred.succeed(processed, undefined)).pipe(Stream.drain),
+            ),
+          ),
+          getPullRequestSnapshot: () =>
+            Deferred.succeed(sweepStarted, undefined).pipe(
+              Effect.as({ snapshotSequence: 1, threads: [thread] }),
+            ),
+          dispatch: (command) =>
+            Effect.sync(() => {
+              commands.push(command);
+              return { sequence: 2, storedEvents: [] };
+            }),
+        }),
+        Layer.mock(ProjectStore.ProjectStoreV2)({
+          listShells: () => Effect.succeed([project]),
+          getShell: () => Effect.succeedSome(project),
+        }),
+        Layer.mock(GitManager.GitManager)({
+          branchPullRequest: () => Effect.succeed(null),
+        }),
+        Layer.mock(PullRequestService.PullRequestService)({
+          notifyLinkedThreadsChanged: Effect.void,
+        }),
+        Layer.mock(RepositoryIdentityResolver.RepositoryIdentityResolver)({
+          resolve: () =>
+            Effect.succeed({
+              canonicalKey: "github.com/acme/project",
+              locator: {
+                source: "git-remote" as const,
+                remoteName: "origin",
+                remoteUrl: "git@github.com:acme/project.git",
+              },
+              provider: SourceControlProviderKind.make("github"),
+              owner: "acme",
+              name: "project",
+            }),
+        }),
+        Layer.mock(BackgroundPolicy.BackgroundPolicy)({}),
+        Layer.succeed(ServerActivation.ServerActivation, Deferred.await(activation)),
+        Layer.succeed(
+          SecureRandom.SecureRandom,
+          SecureRandom.make((size) => new Uint8Array(size).fill(1)),
+        ),
+        FileSystem.layerNoop({}),
+        Path.layer,
+      );
+      yield* Effect.gen(function* () {
+        const service = yield* ThreadPullRequestService.make;
+        yield* service.start();
+        yield* Deferred.succeed(activation, undefined);
+        yield* Deferred.await(sweepStarted);
+        yield* service.drain;
+        expect(commands).toEqual([]);
+
+        yield* Deferred.succeed(reconcile, undefined);
+        yield* Deferred.await(processed);
+        yield* service.drain;
+        expect(commands).toHaveLength(1);
+        expect(commands[0]).toMatchObject({
+          type: "thread.pull-request.sync",
+          threadId: thread.id,
+          expected: { branch: "renamed", branchPullRequest: previousPullRequest },
+          branchPullRequest: null,
+        });
+      }).pipe(Effect.provide(dependencies));
+    }),
+  );
+
   it.effect("refreshes linked-thread readers at most every 10s while activity reorders them", () =>
     Effect.gen(function* () {
       const link = {

@@ -540,6 +540,24 @@ export const OrchestrationV2AppThread = Schema.Struct({
 });
 export type OrchestrationV2AppThread = typeof OrchestrationV2AppThread.Type;
 
+export const OrchestrationV2ThreadBranchReconciliation = Schema.Struct({
+  branch: Schema.String,
+  expectedBranch: OrchestrationV2AppThread.fields.branch,
+  worktreePath: Schema.String,
+});
+export type OrchestrationV2ThreadBranchReconciliation =
+  typeof OrchestrationV2ThreadBranchReconciliation.Type;
+
+export function applyOrchestrationV2ThreadBranchReconciliation<
+  Thread extends Pick<OrchestrationV2AppThread, "branch" | "worktreePath" | "deletedAt">,
+>(thread: Thread, reconciliation: OrchestrationV2ThreadBranchReconciliation): Thread {
+  return thread.worktreePath === reconciliation.worktreePath &&
+    thread.branch === reconciliation.expectedBranch &&
+    thread.deletedAt === null
+    ? { ...thread, branch: reconciliation.branch }
+    : thread;
+}
+
 /** A visit changes read state only, so its event leaves the rest of the thread out. */
 export const OrchestrationV2ThreadVisit = Schema.Struct({
   lastVisitedAt: OrchestrationV2AppThread.fields.lastVisitedAt,
@@ -2021,6 +2039,11 @@ export const OrchestrationV2DomainEvent = Schema.Union([
   }),
   Schema.Struct({
     ...OrchestrationV2EventBase.fields,
+    type: Schema.Literal("thread.branch-reconciled"),
+    payload: OrchestrationV2ThreadBranchReconciliation,
+  }),
+  Schema.Struct({
+    ...OrchestrationV2EventBase.fields,
     type: Schema.Literal("run.created"),
     payload: OrchestrationV2Run,
   }),
@@ -2962,6 +2985,11 @@ export const OrchestrationV2DomainEventJson = Schema.Union([
     ...OrchestrationV2JsonEventBaseFields,
     type: Schema.Literal("thread.visit-recorded"),
     payload: OrchestrationV2ThreadVisitJson,
+  }),
+  Schema.Struct({
+    ...OrchestrationV2JsonEventBaseFields,
+    type: Schema.Literal("thread.branch-reconciled"),
+    payload: OrchestrationV2ThreadBranchReconciliation,
   }),
   Schema.Struct({
     ...OrchestrationV2JsonEventBaseFields,

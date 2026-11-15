@@ -2,7 +2,7 @@ import { assert, it } from "@effect/vitest";
 import {
   ThreadId,
   type OrchestrationV2ThreadShell,
-  type OrchestrationV2ServerCommand,
+  type OrchestrationV2DomainEvent,
 } from "@t3tools/contracts";
 import * as Deferred from "effect/Deferred";
 import * as Stream from "effect/Stream";
@@ -13,7 +13,8 @@ import * as Layer from "effect/Layer";
 import * as GitWorkflowService from "../git/GitWorkflowService.ts";
 import * as VcsStatusBroadcaster from "../vcs/VcsStatusBroadcaster.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
-import * as Orchestrator from "./Orchestrator.ts";
+import * as EventSink from "./EventSink.ts";
+import * as ThreadCommandExecutor from "./ThreadCommandExecutor.ts";
 import * as ThreadManagement from "./ThreadManagementService.ts";
 import * as WorktreeBranchSync from "./WorktreeBranchSync.ts";
 
@@ -21,7 +22,7 @@ it.effect.each([false, true])(
   "reconciles shared worktree branches without changing root checkouts or detached HEADs, conflict=%s",
   (conflict) => {
     const reconciled = Deferred.makeUnsafe<void>();
-    const commands: OrchestrationV2ServerCommand[] = [];
+    const events: OrchestrationV2DomainEvent[] = [];
     const thread = (id: string, branch: string, worktreePath: string | null) =>
       ({ id: ThreadId.make(id), branch, worktreePath }) as OrchestrationV2ThreadShell;
     const snapshot = {
@@ -40,14 +41,14 @@ it.effect.each([false, true])(
       yield* Layer.build(WorktreeBranchSync.layer);
       yield* Deferred.await(reconciled);
       assert.deepEqual(
-        commands.map((command) => {
-          assert.equal(command.type, "thread.metadata.update");
-          if (command.type !== "thread.metadata.update") throw new Error("Unexpected command");
+        events.map((event) => {
+          assert.equal(event.type, "thread.branch-reconciled");
+          if (event.type !== "thread.branch-reconciled") throw new Error("Unexpected event");
           return [
-            command.threadId,
-            command.branch,
-            command.expectedBranch,
-            command.expectedWorktreePath,
+            event.threadId,
+            event.payload.branch,
+            event.payload.expectedBranch,
+            event.payload.worktreePath,
           ];
         }),
         [
@@ -59,6 +60,7 @@ it.effect.each([false, true])(
     }).pipe(
       Effect.provide(
         Layer.mergeAll(
+          ThreadCommandExecutor.layer,
           FileSystem.layerNoop({
             realPath: (path) => Effect.succeed(path === "/link/worktree" ? "/worktree" : path),
           }),
@@ -86,21 +88,18 @@ it.effect.each([false, true])(
           }),
           Layer.mock(ThreadManagement.ThreadManagementService)({
             getShellSnapshot: () => Effect.succeed(snapshot),
-            dispatch: (command) =>
+          }),
+          Layer.mock(EventSink.EventSinkV2)({
+            write: (input) =>
               Effect.gen(function* () {
-                commands.push(command);
-                if (
-                  command.type === "thread.metadata.update" &&
-                  command.threadId === ThreadId.make("generated") &&
-                  conflict
-                ) {
-                  return yield* new Orchestrator.OrchestratorDispatchError({
-                    commandId: command.commandId,
-                    commandType: command.type,
-                    cause: "Thread moved before branch metadata could be applied.",
+                events.push(...input.events);
+                if (input.events[0]?.threadId === ThreadId.make("generated") && conflict) {
+                  return yield* new EventSink.EventSinkWriteError({
+                    eventCount: input.events.length,
+                    cause: "Branch write failed.",
                   });
                 }
-                return { sequence: commands.length, storedEvents: [] };
+                return [];
               }),
           }),
         ),

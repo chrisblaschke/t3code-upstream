@@ -4,6 +4,7 @@ import * as Schema from "effect/Schema";
 
 import { NodeId, RunAttemptId, TrimmedNonEmptyString } from "./index.ts";
 import {
+  applyOrchestrationV2ThreadBranchReconciliation,
   latestProviderTurnForAttempt,
   OrchestrationV2CheckpointFileSummary,
   OrchestrationV2ProviderCapabilities,
@@ -37,6 +38,21 @@ const decodeOrchestrationV2ProviderCapabilities = Schema.decodeUnknownSync(
 );
 
 describe("orchestration V2 contracts", () => {
+  it.each([
+    { worktreePath: "/worktree", branch: "before", deletedAt: null, expected: "after" },
+    { worktreePath: "/moved", branch: "before", deletedAt: null, expected: "before" },
+    { worktreePath: "/worktree", branch: "changed", deletedAt: null, expected: "changed" },
+    { worktreePath: "/worktree", branch: "before", deletedAt: now, expected: "before" },
+  ])("guards branch reconciliation against moved or deleted threads: %j", (row) => {
+    const thread = { ...row, activeProviderThreadId: "attached", title: "Keep this title" };
+    const updated = applyOrchestrationV2ThreadBranchReconciliation(thread, {
+      branch: "after",
+      expectedBranch: "before",
+      worktreePath: "/worktree",
+    });
+    expect(updated).toEqual({ ...thread, branch: row.expected });
+  });
+
   it("decodes thread event types from a newer server as skippable items", () => {
     const decodeWireItems = Schema.decodeUnknownSync(
       Schema.toCodecJson(Schema.Array(OrchestrationV2RpcSchemas.subscribeThread.output)),
