@@ -29,5 +29,8 @@ export const resolvePiTerminalLaunch = Effect.fn(function* (input: {
     command: launch.command,
     args: launch.args,
     env: yield* mergeProviderInstanceEnvironment(input.environment, {}),
+    redact: (input.environment ?? []).flatMap((value) =>
+      value.sensitive && typeof value.value === "string" && value.value ? [value.value] : [],
+    ),
   };
 });

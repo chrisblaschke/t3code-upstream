@@ -837,6 +837,80 @@ it.layer(
       }),
   );
 
+  it.effect("redacts Pi credentials before live output, snapshots and persisted replay", () =>
+    Effect.gen(function* () {
+      const { manager, ptyAdapter, logsDir, getEvents } = yield* createManager();
+      const secret = "literal-synthetic-credential";
+      const launch = { command: "pi", args: [], env: { API_KEY: secret }, redact: [secret] };
+      yield* manager.openProcess(openInput(), launch);
+      const attached = yield* Ref.make<ReadonlyArray<TerminalAttachStreamEvent>>([]);
+      const unsubscribe = yield* manager.attachStream(openInput(), (event) =>
+        Ref.update(attached, (events) => [...events, event]),
+      );
+      yield* Effect.addFinalizer(() => Effect.sync(unsubscribe));
+      const process = ptyAdapter.processes[0]!;
+      process.emitData(`whole=${secret}\nsplit=${secret.slice(0, 9)}`);
+      process.emitData(`${secret.slice(9)}\nlast\n`);
+      yield* manager.close({ threadId: "thread-1" });
+      const expected = "whole=[REDACTED]\nsplit=[REDACTED]\nlast\n";
+      const live = (yield* getEvents)
+        .filter((event) => event.type === "output")
+        .map((event) => event.data)
+        .join("");
+      expect(live).toBe(expected);
+      expect(
+        (yield* Ref.get(attached))
+          .filter((event) => event.type === "output")
+          .map((event) => event.data)
+          .join(""),
+      ).toBe(expected);
+      expect(yield* readFileString(yield* historyLogPath(logsDir))).toBe(expected);
+      const reopened = yield* manager.open(openInput());
+      expect(reopened.history).toBe(expected);
+      expect(
+        (yield* Ref.get(attached)).filter((event) => event.type === "snapshot").at(-1)?.snapshot
+          .history,
+      ).toBe(expected);
+    }),
+  );
+
+  it.effect(
+    "publishes complete Pi control sequences without holding their final credential prefix",
+    () =>
+      Effect.gen(function* () {
+        const { manager, ptyAdapter, getEvents } = yield* createManager();
+        const launch = {
+          command: "pi",
+          args: [],
+          env: {},
+          redact: ["literal-synthetic-credential"],
+        };
+        yield* manager.openProcess(openInput(), launch);
+        const frames = ["\u001b[?2026hhello\u001b[?2026l", "\u001b[?2026hagain\u001b[?2026l"];
+        for (const frame of frames) {
+          const published = yield* Deferred.make<void>();
+          const unsubscribe = yield* manager.subscribe((event) =>
+            event.type === "output"
+              ? Deferred.succeed(published, undefined).pipe(Effect.asVoid)
+              : Effect.void,
+          );
+          yield* Effect.addFinalizer(() => Effect.sync(unsubscribe));
+          const process = ptyAdapter.processes[0]!;
+          if (frame === frames[0]) process.emitData(frame);
+          else {
+            process.emitData(frame.slice(0, -1));
+            process.emitData(frame.slice(-1));
+          }
+          yield* Deferred.await(published);
+          const output = (yield* getEvents)
+            .filter((event) => event.type === "output")
+            .map((event) => event.data)
+            .join("");
+          expect(output).toBe(frames.slice(0, frames.indexOf(frame) + 1).join(""));
+        }
+      }),
+  );
+
   it.effect("keeps Pi launch arguments and spawn causes out of results, logs and traces", () =>
     Effect.gen(function* () {
       const { manager, ptyAdapter, getEvents } = yield* createManager();

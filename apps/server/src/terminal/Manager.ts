@@ -278,6 +278,7 @@ export interface TerminalProcessLaunch {
   readonly command: string;
   readonly args: ReadonlyArray<string>;
   readonly env: NodeJS.ProcessEnv;
+  readonly redact?: ReadonlyArray<string>;
 }
 
 export interface ShellCandidate {
@@ -523,6 +524,59 @@ function enqueueProcessEvent(
 
   session.processEventDrainRunning = true;
   return true;
+}
+
+// Retain incomplete literal credentials, but consume CSI sequences as units: their
+// final byte (notably Pi's ESC[?2026l) must never become a pending text prefix.
+function terminalOutputRedactor(secrets: ReadonlyArray<string>) {
+  const values = [...new Set(secrets.filter(Boolean))].toSorted((a, b) => b.length - a.length);
+  const starts = new RegExp(
+    ["\u001b", ...new Set(values.map((value) => value[0]!))]
+      .map((value) => RegExp.escape(value))
+      .join("|"),
+    "g",
+  );
+  const literals = new RegExp(values.map((value) => RegExp.escape(value)).join("|"), "g");
+  let pending = "";
+  return (data: string, flush = false) => {
+    if (values.length === 0) return data;
+    const input = pending + data;
+    pending = "";
+    let output = "";
+    let index = 0;
+    while (index < input.length) {
+      starts.lastIndex = index;
+      const next = starts.exec(input)?.index ?? input.length;
+      output += input.slice(index, next);
+      index = next;
+      if (index === input.length) break;
+      const match = values.find((value) => input.startsWith(value, index));
+      if (match) {
+        output += "[REDACTED]";
+        index += match.length;
+        continue;
+      }
+      if (input.startsWith("\u001b[", index)) {
+        const sequence = /^\u001b\[[0-?]*[ -/]*[@-~]/.exec(input.slice(index))?.[0];
+        if (sequence) {
+          output += sequence.replace(literals, "[REDACTED]");
+          index += sequence.length;
+          continue;
+        }
+      }
+      const rest = input.slice(index);
+      if (
+        !flush &&
+        (values.some((value) => value.startsWith(rest)) || /^\u001b(?:\[[0-?]*[ -/]*)?$/.test(rest))
+      ) {
+        pending = rest;
+        break;
+      }
+      output += input[index];
+      index += 1;
+    }
+    return output;
+  };
 }
 
 function defaultShellResolver(platform: NodeJS.Platform, env: NodeJS.ProcessEnv): string {
@@ -2531,17 +2585,25 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
               session.pid = processPid;
               session.status = "running";
               // onExit may replay an exit immediately; accept it before subscribing.
-              session.unsubscribeData = spawnResult.process.onData((data) => {
-                if (!enqueueProcessEvent(session, processPid, { type: "output", data })) {
+              const redact = terminalOutputRedactor(session.launch?.redact ?? []);
+              session.unsubscribeData = spawnResult.process.onData((chunk) => {
+                const data = redact(chunk);
+                if (!data || !enqueueProcessEvent(session, processPid, { type: "output", data })) {
                   return;
                 }
                 if (eventsActivated) runFork(drainProcessEvents(session, processPid));
               });
               session.unsubscribeExit = spawnResult.process.onExit((event) => {
-                if (!enqueueProcessEvent(session, processPid, { type: "exit", event })) {
-                  return;
-                }
-                if (eventsActivated) runFork(drainProcessEvents(session, processPid));
+                const data = redact("", true);
+                const outputQueued = data
+                  ? enqueueProcessEvent(session, processPid, { type: "output", data })
+                  : false;
+                const exitQueued = enqueueProcessEvent(session, processPid, {
+                  type: "exit",
+                  event,
+                });
+                if (eventsActivated && (outputQueued || exitQueued))
+                  runFork(drainProcessEvents(session, processPid));
               });
               eventStamp = advanceEventSequence(session);
               return [undefined, state] as const;

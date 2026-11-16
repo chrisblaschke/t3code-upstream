@@ -56,6 +56,7 @@ export interface ProviderInstance {
       readonly command: string;
       readonly args: ReadonlyArray<string>;
       readonly env: NodeJS.ProcessEnv;
+      readonly redact?: ReadonlyArray<string>;
     },
     ProviderDriverError
   >;

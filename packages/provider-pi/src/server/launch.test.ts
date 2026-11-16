@@ -21,8 +21,10 @@ it.effect(
         API_KEY: "instance-credential",
         PORT: "9000",
       });
+      expect(launch.redact).toEqual(["instance-credential"]);
       const defaults = yield* resolvePiTerminalLaunch({ config, environment: undefined });
       expect(defaults.env).toEqual({});
+      expect(defaults.redact).toEqual([]);
     }).pipe(
       Effect.provideService(HostProcess.Environment, {
         T3CODE_DEV_AUTH_TOKEN: "server-only-token",
