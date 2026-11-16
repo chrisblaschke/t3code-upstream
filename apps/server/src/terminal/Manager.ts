@@ -305,6 +305,7 @@ interface TerminalSessionState {
   pendingProcessEvents: Array<PendingProcessEvent | undefined>;
   pendingProcessEventIndex: number;
   processEventDrainRunning: boolean;
+  processEventDrainFiber?: Fiber.Fiber<void>;
   exitCode: number | null;
   exitSignal: number | null;
   updatedAt: string;
@@ -2397,6 +2398,8 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
     const flushOutput = session.flushOutput;
     cleanupProcessHandles(session);
     flushOutput?.();
+    if (session.processEventDrainFiber) yield* Fiber.join(session.processEventDrainFiber);
+    delete session.processEventDrainFiber;
     yield* drainProcessEvents(session, process.pid);
 
     const updatedAt = yield* nowIso;
@@ -2598,7 +2601,8 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
                 if (!data || !enqueueProcessEvent(session, processPid, { type: "output", data })) {
                   return;
                 }
-                if (eventsActivated) runFork(drainProcessEvents(session, processPid));
+                if (eventsActivated)
+                  session.processEventDrainFiber = runFork(drainProcessEvents(session, processPid));
               });
               session.flushOutput = () => {
                 const data = redact("", true);
@@ -2613,7 +2617,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
                   event,
                 });
                 if (eventsActivated && (outputQueued || exitQueued))
-                  runFork(drainProcessEvents(session, processPid));
+                  session.processEventDrainFiber = runFork(drainProcessEvents(session, processPid));
               });
               eventStamp = advanceEventSequence(session);
               return [undefined, state] as const;
@@ -2628,7 +2632,8 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
             });
             // Publish startup before draining any events replayed during subscription.
             eventsActivated = true;
-            if (session.processEventDrainRunning) runFork(drainProcessEvents(session, processPid));
+            if (session.processEventDrainRunning)
+              session.processEventDrainFiber = runFork(drainProcessEvents(session, processPid));
           }),
         ),
       ),
