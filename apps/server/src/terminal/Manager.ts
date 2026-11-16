@@ -538,7 +538,6 @@ function terminalOutputRedactor(secrets: ReadonlyArray<string>) {
       .join("|"),
     "g",
   );
-  const literals = new RegExp(values.map((value) => RegExp.escape(value)).join("|"), "g");
   let pending = "";
   return (data: string, flush = false) => {
     if (values.length === 0) return data;
@@ -555,7 +554,7 @@ function terminalOutputRedactor(secrets: ReadonlyArray<string>) {
       if (input.startsWith("\u001b[", index)) {
         const sequence = /^\u001b\[[0-?]*[ -/]*[@-~]/.exec(input.slice(index))?.[0];
         if (sequence) {
-          output += sequence.replace(literals, "[REDACTED]");
+          output += sequence;
           index += sequence.length;
           continue;
         }

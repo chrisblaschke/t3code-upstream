@@ -890,10 +890,13 @@ it.layer(
           command: "pi",
           args: [],
           env: {},
-          redact: ["literal-synthetic-credential"],
+          redact: ["literal-synthetic-credential", "31", "2026", "m"],
         };
         yield* manager.openProcess(openInput(), launch);
-        const frames = ["\u001b[?2026hhello\u001b[?2026l", "\u001b[?2026hagain\u001b[?2026l"];
+        const frames = [
+          "\u001b[?2026h\u001b[31mhello\u001b[0m\u001b[?2026l",
+          "\u001b[?2026hagain\u001b[?2026l",
+        ];
         for (const frame of frames) {
           const published = yield* Deferred.make<void>();
           const unsubscribe = yield* manager.subscribe((event) =>
