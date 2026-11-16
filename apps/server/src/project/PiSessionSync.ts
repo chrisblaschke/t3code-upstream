@@ -1145,6 +1145,7 @@ export const layer = Layer.effectDiscard(
           }),
         ),
       ),
+      Stream.merge(Stream.tick(FULL_SYNC_INTERVAL_MS).pipe(Stream.drop(1), Stream.as(undefined))),
       Stream.runForEach(syncAfterChanges),
       Effect.catchCause((cause) => Effect.logWarning("Pi session watcher stopped", { cause })),
       Effect.forkScoped,

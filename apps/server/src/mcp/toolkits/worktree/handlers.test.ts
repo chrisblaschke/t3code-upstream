@@ -113,6 +113,12 @@ const fixture = Effect.gen(function* () {
         } as never),
     }),
     Layer.mock(Project.ProjectService)({
+      snapshot: Effect.succeed({
+        projects: [
+          { id: projectId, workspaceRoot: main },
+          { id: otherProject, workspaceRoot: linked },
+        ],
+      } as never),
       getById: (id) => {
         expect(id).toBe(projectId);
         return Effect.succeedSome({ id: projectId, workspaceRoot: main } as never);
@@ -134,7 +140,10 @@ const fixture = Effect.gen(function* () {
       getShellSnapshot: (options) => {
         expect(options?.projectId).toBeUndefined();
         expect(options?.location).toBeUndefined();
-        return Effect.succeed({ threads: owners } as never);
+        return Effect.succeed({
+          threads: owners.filter((owner) => owner.archivedAt === null),
+          archivedThreads: owners.filter((owner) => owner.archivedAt !== null),
+        } as never);
       },
     }),
   );
@@ -157,8 +166,48 @@ const fixture = Effect.gen(function* () {
       if (result.isFailure) throw new Error(JSON.stringify(result.result));
       return yield* decodeListResult(result.result);
     });
-  return { fs, path, main, linked, root, git, indexPath, refs, list, calls };
+  return { fs, path, main, linked, root, git, indexPath, refs, list, calls, owners };
 });
+
+it.effect("finds workspace-root owners in primary and linked projects", () =>
+  Effect.gen(function* () {
+    const f = yield* fixture;
+    f.owners.push(
+      { ...liveThreadShell(ThreadId.make("thread:primary")), projectId, worktreePath: null },
+      {
+        ...liveThreadShell(ThreadId.make("thread:linked-root")),
+        projectId: otherProject,
+        worktreePath: null,
+      },
+    );
+    const result = yield* f.list({ includeOwners: true });
+    expect(result.refs[0]?.owners).toEqual([
+      { threadId: "thread:primary", projectId, settled: false, archived: false },
+    ]);
+    expect(result.refs[1]?.owners).toContainEqual({
+      threadId: "thread:linked-root",
+      projectId: otherProject,
+      settled: false,
+      archived: false,
+    });
+  }).pipe(Effect.scoped, Effect.provide(layerPlatform)),
+);
+
+it.effect("matches symlinked owner paths to Git's canonical worktree paths", () =>
+  Effect.gen(function* () {
+    const f = yield* fixture;
+    const alias = f.path.join(f.root, "linked-alias");
+    yield* f.fs.symlink(f.linked, alias);
+    f.owners[0] = { ...f.owners[0]!, worktreePath: alias };
+    f.owners[1] = { ...f.owners[1]!, worktreePath: alias };
+    f.refs[1] = { ...f.refs[1]!, worktreePath: yield* f.fs.realPath(f.linked) };
+    const result = yield* f.list({ includeOwners: true });
+    expect(result.refs[1]?.owners).toEqual([
+      { threadId: "thread:owner-a", projectId, settled: false, archived: false },
+      { threadId: "thread:owner-b", projectId: otherProject, settled: true, archived: true },
+    ]);
+  }).pipe(Effect.scoped, Effect.provide(layerPlatform)),
+);
 
 it.effect("keeps inventory available after the thread worktree was removed", () =>
   Effect.gen(function* () {

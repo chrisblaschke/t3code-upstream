@@ -260,8 +260,9 @@ import {
   useQuietThreadShell,
   useThreadCheckpointSummaries,
 } from "../state/entities";
-import { useEnvironmentShellHasSnapshot, shellEnvironment } from "../state/shell";
-import { resolvePiTuiLaunch } from "@t3tools/client-runtime/state/pi-tui";
+import { useEnvironmentShellHasSnapshot } from "../state/shell";
+import { terminalEnvironment } from "../state/terminal";
+import { canOpenPiTui } from "@t3tools/client-runtime/state/pi-tui";
 import { ChatComposer, type ChatComposerHandle } from "./chat/ChatComposer";
 import { DraftHeroHeadline } from "./chat/DraftHeroHeadline";
 import { ExpandedImageDialogHost, openExpandedImagePreview } from "./chat/ExpandedImageDialog";
@@ -2716,49 +2717,25 @@ export default function ChatView(props: ChatViewProps) {
     isDesktop: isElectron,
   });
   const getShortcutContextStable = useStableCallback(getShortcutContext);
-  const canOpenExternalTerminal = useAtomValue(
-    shellEnvironment.openExternalTerminal.permissionAtom(environmentId),
-  );
-  const openExternalTerminal = useAtomCommand(
-    shellEnvironment.openExternalTerminal,
-    "open Pi terminal",
-  );
-  const piTuiLaunch = resolvePiTuiLaunch(
-    serverProjection,
-    serverConfig?.settings.providerInstances,
-  );
-  const useHostTerminal =
-    isElectron && environmentId === hostEnvironmentId && serverConfig?.externalTerminal === "kitty";
-  const canOpenPiTerminal = canOperateTerminal && (!useHostTerminal || canOpenExternalTerminal);
+  const launchPiTerminal = useAtomCommand(terminalEnvironment.openPi, "open Pi terminal");
+  const piTuiLaunch = canOpenPiTui(serverProjection);
+  const canOpenPiTerminal = useAtomValue(terminalEnvironment.openPi.permissionAtom(environmentId));
   const openPiTerminal = useStableCallback(async () => {
     if (!canOpenPiTerminal || !piTuiLaunch || !activeProject || !activeThread) return;
-    const cwd = gitCwd ?? activeProject.workspaceRoot;
-    if (!cwd) return;
-    if (useHostTerminal) {
-      const result = await openExternalTerminal({
-        environmentId,
-        input: { cwd, command: [...piTuiLaunch.argv], title: `pi · ${activeThread.title}` },
-      });
-      if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
-        const error = squashAtomCommandFailure(result);
+    const result = await launchPiTerminal({ environmentId, input: { threadId: activeThread.id } });
+    if (result._tag === "Failure") {
+      if (!isAtomCommandInterrupted(result))
         toastManager.add({
           type: "error",
           title: "Could not open Pi terminal",
-          description: error instanceof Error ? error.message : "Opening the terminal failed.",
+          description: "Opening the terminal failed.",
         });
-      }
       return;
     }
-    await runProjectScriptStable(
-      {
-        id: "pi-tui",
-        name: "Pi TUI",
-        command: piTuiLaunch.shellCommand,
-        icon: "play",
-        runOnWorktreeCreate: false,
-      },
-      { preferNewTerminal: true, rememberAsLastInvoked: false },
-    );
+    if (activeThreadRef)
+      useTerminalUiStateStore
+        .getState()
+        .ensureTerminal(activeThreadRef, result.value.terminalId, { open: true, active: true });
   });
   const timelineSkills = activeProviderStatus
     ? resolveProviderSkillsForCwd(activeProviderStatus, gitCwd)

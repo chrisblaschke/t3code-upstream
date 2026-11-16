@@ -173,6 +173,11 @@ export class TerminalManager extends Context.Service<
       input: TerminalOpenInput,
     ) => Effect.Effect<TerminalSessionSnapshot, TerminalError>;
 
+    readonly openProcess: (
+      input: TerminalOpenInput,
+      launch: TerminalProcessLaunch,
+    ) => Effect.Effect<TerminalSessionSnapshot, TerminalError>;
+
     readonly getShell: (input: TerminalObserveInput) => Effect.Effect<string, TerminalError>;
 
     /**
@@ -269,6 +274,12 @@ const resizePtyProcess = (
       }),
   });
 
+export interface TerminalProcessLaunch {
+  readonly command: string;
+  readonly args: ReadonlyArray<string>;
+  readonly env: NodeJS.ProcessEnv;
+}
+
 export interface ShellCandidate {
   shell: string;
   args?: string[];
@@ -307,6 +318,7 @@ interface TerminalSessionState {
   hasRunningSubprocess: boolean;
   childCommandLabel: string | null;
   runtimeEnv: Record<string, string> | null;
+  launch?: TerminalProcessLaunch;
   stopOnSettle: boolean;
 }
 
@@ -378,6 +390,7 @@ function normalizeChildCommandName(raw: string, platform: NodeJS.Platform): stri
 }
 
 function terminalWireLabel(session: TerminalSessionState): string {
+  if (session.launch) return "Pi";
   if (session.hasRunningSubprocess && session.childCommandLabel) {
     const trimmed = session.childCommandLabel.trim();
     if (trimmed.length > 0) {
@@ -2401,11 +2414,13 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
       return {
         process: attempt.success,
         shell: candidate.shell,
-        shellLabel: formatShellCandidate(candidate),
+        shellLabel: session.launch ? "Pi" : formatShellCandidate(candidate),
       };
     }
 
     const spawnError = attempt.failure;
+    // Pi launch arguments can carry credentials and errors are recorded in trace spans: keep both out.
+    if (session.launch) return yield* new PtyAdapter.PtySpawnError({ adapter: "Pi terminal" });
     if (!isRetryableShellSpawnError(spawnError)) {
       return yield* spawnError;
     }
@@ -2452,10 +2467,18 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
       increment(terminalSessionsTotal, { lifecycle: eventType }).pipe(
         Effect.andThen(
           Effect.gen(function* () {
-            const shellCandidates = resolveShellCandidates(shellResolver, platform, baseEnv);
+            const shellCandidates = session.launch
+              ? [{ shell: session.launch.command, args: [...session.launch.args] }]
+              : resolveShellCandidates(shellResolver, platform, baseEnv);
             const terminalEnv = createTerminalSpawnEnv(
               baseEnv,
-              session.runtimeEnv,
+              session.launch
+                ? Object.fromEntries(
+                    Object.entries(session.launch.env).filter(
+                      (e): e is [string, string] => e[1] !== undefined,
+                    ),
+                  )
+                : session.runtimeEnv,
               platform,
               yield* HostProcess.HomeDirectory,
             );
@@ -2708,7 +2731,9 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
         return;
       }
 
-      const next = inspectResult.value;
+      const next = session.launch
+        ? { ...inspectResult.value, hasRunningSubprocess: true, childCommand: "Pi" }
+        : inspectResult.value;
       yield* registerTerminalProcesses({
         threadId: session.threadId,
         terminalId: session.terminalId,
@@ -2840,6 +2865,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
 
   const openWithWorkspaceLease = Effect.fn("terminal.openLocked")(function* (
     requestedInput: TerminalOpenInput,
+    launch?: TerminalProcessLaunch,
   ) {
     const terminalId = requestedInput.terminalId;
     yield* assertValidCwd(requestedInput.cwd);
@@ -2887,6 +2913,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
         hasRunningSubprocess: false,
         childCommandLabel: null,
         runtimeEnv: normalizedRuntimeEnv(input.env),
+        ...(launch ? { launch } : {}),
         stopOnSettle: input.stopOnSettle ?? false,
       };
 
@@ -2913,6 +2940,15 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
     }
 
     const liveSession = existing.value;
+    // A Pi session's launch context is chosen by the server; an ordinary open only attaches to it.
+    if (liveSession.launch) {
+      const cols = input.cols ?? liveSession.cols;
+      const rows = input.rows ?? liveSession.rows;
+      if (liveSession.process && (liveSession.cols !== cols || liveSession.rows !== rows)) {
+        yield* resizeSession(liveSession, liveSession.process, cols, rows);
+      }
+      return snapshot(liveSession);
+    }
     if (input.stopOnSettle !== undefined) liveSession.stopOnSettle = input.stopOnSettle;
     const nextRuntimeEnv = normalizedRuntimeEnv(input.env);
     const currentRuntimeEnv = liveSession.runtimeEnv;
@@ -2969,10 +3005,10 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
     return snapshot(liveSession);
   });
 
-  const openLocked = (input: TerminalOpenInput) =>
+  const openLocked = (input: TerminalOpenInput, launch?: TerminalProcessLaunch) =>
     withWorkspaceLease(
       path.resolve(input.worktreePath ?? input.cwd),
-      openWithWorkspaceLease(input),
+      openWithWorkspaceLease(input, launch),
     );
 
   const open: TerminalManager["Service"]["open"] = (input) =>
@@ -2980,6 +3016,9 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
       input.threadId,
       resolveLaunchInputEnvironment(input).pipe(Effect.flatMap(openLocked)),
     );
+
+  const openProcess: TerminalManager["Service"]["openProcess"] = (input, launch) =>
+    withThreadLock(input.threadId, openLocked(input, launch));
 
   const getShell = Effect.fn("terminal.getShell")(function* (input: TerminalObserveInput) {
     const session = yield* requireSession(input.threadId, input.terminalId);
@@ -3453,6 +3492,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
           (session) =>
             inspector(session.pid).pipe(
               Effect.flatMap((result) =>
+                session.launch ||
                 result.hasRunningSubprocess ||
                 terminalActivityMark(session) !== marks.get(session.terminalId)
                   ? Effect.void
@@ -3490,6 +3530,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
 
   return TerminalManager.of({
     open,
+    openProcess,
     getShell,
     attachStream,
     attachOutputStream,

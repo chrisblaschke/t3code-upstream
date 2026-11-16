@@ -93,6 +93,12 @@ export function createTerminalEnvironmentAtoms<R, E>(
       scheduler: lifecycleScheduler,
       concurrency: lifecycleConcurrency,
     }),
+    openPi: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:terminal:open-pi",
+      tag: WS_METHODS.terminalOpenPi,
+      scheduler: lifecycleScheduler,
+      concurrency: lifecycleConcurrency,
+    }),
     write: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:terminal:write",
       tag: WS_METHODS.terminalWrite,

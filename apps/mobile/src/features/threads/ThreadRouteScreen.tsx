@@ -1,3 +1,4 @@
+import { useAtomValue } from "@effect/atom-react";
 import * as Dialog from "../../components/ui/Dialog";
 import { useRememberThreadProject } from "./useRememberThreadProject";
 import { useOpenPullRequest } from "../../native/useOpenPullRequest";
@@ -79,8 +80,8 @@ import {
   stagePendingTerminalLaunch,
 } from "../terminal/terminalLaunchContext";
 import type { ThreadDetailScreenProps } from "./ThreadDetailScreen";
-import { buildPiTuiTerminalLaunch } from "../terminal/piTuiLaunch";
-import { resolvePiTuiLaunch } from "@t3tools/client-runtime/state/pi-tui";
+import { terminalEnvironment } from "../../state/terminal";
+import { canOpenPiTui } from "@t3tools/client-runtime/state/pi-tui";
 import { ThreadScreenBinding, ThreadScreenFallback, ThreadScreenHost } from "./ThreadScreenHost";
 import { draftRouteIdentity } from "./thread-route-state";
 import { NewTaskDraftRouteScreen, type NewTaskDraftRouteParams } from "./NewTaskDraftRouteScreen";
@@ -723,13 +724,14 @@ function ThreadRouteContent(
     });
   };
 
-  const piTuiLaunch = resolvePiTuiLaunch(
-    selectedThreadDetail,
-    routeEnvironmentRuntime?.serverConfig?.settings.providerInstances,
+  const canOpenPiTerminal = useAtomValue(
+    terminalEnvironment.openPi.permissionAtom(selectedThread?.environmentId ?? null),
   );
-  const handleOpenPiTerminal = () => {
+  const piTuiLaunch = canOpenPiTui(selectedThreadDetail);
+  const openPiTerminal = useAtomCommand(terminalEnvironment.openPi, "open Pi terminal");
+  const handleOpenPiTerminal = async () => {
     if (
-      !canOperateTerminal ||
+      !canOpenPiTerminal ||
       !piTuiLaunch ||
       !selectedThread ||
       !selectedThreadProject?.workspaceRoot ||
@@ -737,25 +739,16 @@ function ThreadRouteContent(
     ) {
       return;
     }
-    const { terminalId: piTerminalId, launch } = buildPiTuiTerminalLaunch({
-      piTui: piTuiLaunch,
-      listedTerminalIds:
-        knownTerminalSessions === null ||
-        !readEnvironmentScope(selectedThread.environmentId, AuthTerminalReadScope)
-          ? null
-          : terminalMenuSessions.map((session) => session.terminalId),
-      workspaceRoot: selectedThreadProject.workspaceRoot,
-      threadShellWorktreePath: selectedThread.worktreePath ?? null,
-      threadDetailWorktreePath: selectedThreadDetailWorktreePath,
+    const result = await openPiTerminal({
+      environmentId: selectedThread.environmentId,
+      input: { threadId: selectedThread.id },
     });
-    stagePendingTerminalLaunch({
-      target: {
-        environmentId: selectedThread.environmentId,
-        threadId: selectedThread.id,
-        terminalId: piTerminalId,
-      },
-      launch,
-    });
+    if (result._tag === "Failure") {
+      if (!isAtomCommandInterrupted(result))
+        Dialog.alert("Could not open Pi terminal", "Opening the terminal failed.");
+      return;
+    }
+    const piTerminalId = result.value.terminalId;
     void navigation.navigate("ThreadTerminal", {
       environmentId: String(selectedThread.environmentId),
       threadId: String(selectedThread.id),
@@ -840,7 +833,7 @@ function ThreadRouteContent(
     terminalSessions: terminalMenuSessions,
     onOpenTerminal: handleOpenTerminal,
     onOpenNewTerminal: handleOpenNewTerminal,
-    onOpenPiTerminal: piTuiLaunch && canOperateTerminal ? handleOpenPiTerminal : undefined,
+    onOpenPiTerminal: piTuiLaunch && canOpenPiTerminal ? handleOpenPiTerminal : undefined,
     onRunProjectScript: handleRunProjectScript,
     onPull: gitActions.onPullSelectedThreadBranch,
     onRunAction: gitActions.onRunSelectedThreadGitAction,

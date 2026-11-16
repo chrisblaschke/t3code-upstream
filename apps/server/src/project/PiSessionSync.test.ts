@@ -44,6 +44,8 @@ import {
   piSessionWatchDirectories,
 } from "./PiSessionSync.ts";
 import { parsePiSessionEntries } from "./piSessionItems.ts";
+import * as PiSessionSync from "./PiSessionSync.ts";
+import * as ServerSettings from "../serverSettings.ts";
 
 it.effect("watch directories share discovery's path rules and tolerate secret references", () =>
   Effect.gen(function* () {
@@ -455,6 +457,48 @@ it.effect(
         Layer.mergeAll(NodeSqliteClient.layer({ filename: ":memory:" }), NodeServices.layer),
       ),
     ),
+);
+
+it.effect("reconciles periodically without filesystem events", () =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const dir = yield* fs.makeTempDirectoryScoped({ prefix: "pi-periodic-" });
+    const started = yield* Deferred.make<void>();
+    let queries = 0;
+    yield* Layer.build(PiSessionSync.layer).pipe(
+      Effect.provide(
+        Layer.mergeAll(
+          ServerConfig.layerTest(dir, dir),
+          IdAllocator.layer,
+          Layer.succeed(HostProcess.Environment, { PI_CODING_AGENT_DIR: dir }),
+          Layer.succeed(SqlClient.SqlClient, (() =>
+            Effect.sync(() => {
+              queries++;
+              return [];
+            })) as unknown as SqlClient.SqlClient),
+          Layer.mock(Orchestrator.OrchestratorV2)({}),
+          Layer.mock(EventSink.EventSinkV2)({}),
+          Layer.mock(AgentSessionImporter)({}),
+          Layer.mock(ProjectService.ProjectService)({
+            snapshot: Deferred.succeed(started, undefined).pipe(
+              Effect.as({ projects: [] } as never),
+            ),
+          }),
+          Layer.mock(ServerSettings.ServerSettingsService)({
+            getSettings: Effect.succeed({ providerInstances: {} } as never),
+            subscribeChanges: Effect.succeed(Stream.never),
+          }),
+        ),
+      ),
+      Effect.provideService(FileSystem.FileSystem, { ...fs, watch: () => Stream.never }),
+    );
+    yield* Deferred.await(started);
+    expect(queries).toBe(1);
+    yield* TestClock.adjust("5 minutes");
+    expect(queries).toBe(2);
+    yield* TestClock.adjust("5 minutes");
+    expect(queries).toBe(3);
+  }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
 );
 
 it.effect("keeps all debounced paths, including events arriving during a sync", () =>

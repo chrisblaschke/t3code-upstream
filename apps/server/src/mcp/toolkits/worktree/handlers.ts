@@ -68,11 +68,26 @@ const handlers = {
         fs.realPath(path).pipe(Effect.orElseSucceed(() => resolve(path)));
       const primaryPath = yield* primaryWorktree(cwd).pipe(Effect.mapError(unavailable));
       const primary = primaryPath === null ? null : yield* canonical(primaryPath);
-      const shells = includeOwners
-        ? (yield* (yield* Orchestrator.OrchestratorV2)
+      const snapshot = includeOwners
+        ? yield* (yield* Orchestrator.OrchestratorV2)
             .getShellSnapshot()
-            .pipe(Effect.mapError(unavailable))).threads
+            .pipe(Effect.mapError(unavailable))
+        : undefined;
+      const ownerProjects = includeOwners
+        ? (yield* projects.snapshot.pipe(Effect.mapError(unavailable))).projects
         : [];
+      const shells = yield* Effect.forEach(
+        snapshot ? [...snapshot.threads, ...snapshot.archivedThreads] : [],
+        (owner) => {
+          const ownerPath =
+            owner.worktreePath ??
+            ownerProjects.find((project) => project.id === owner.projectId)?.workspaceRoot;
+          return owner.deletedAt !== null || ownerPath === undefined
+            ? Effect.succeed([])
+            : canonical(ownerPath).pipe(Effect.map((path) => [{ owner, path }]));
+        },
+        { concurrency: 4 },
+      ).pipe(Effect.map((owners) => owners.flat()));
       const paths = [
         ...new Set(
           listed.refs.flatMap((ref) =>
@@ -95,13 +110,8 @@ const handlers = {
                   ...(includeOwners
                     ? {
                         owners: shells
-                          .filter(
-                            (owner) =>
-                              owner.deletedAt === null &&
-                              owner.worktreePath !== null &&
-                              keys.has(resolve(owner.worktreePath)),
-                          )
-                          .map((owner) => ({
+                          .filter(({ path }) => keys.has(path))
+                          .map(({ owner }) => ({
                             threadId: owner.id,
                             projectId: owner.projectId,
                             settled: owner.settledOverride === "settled",

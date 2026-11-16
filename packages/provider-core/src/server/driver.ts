@@ -50,6 +50,15 @@ export interface ProviderInstance {
   ) => Effect.Effect<ProviderConsumeResetCreditOutcome, ProviderDriverError>;
   readonly orchestrationAdapter: ProviderAdapter.ProviderAdapterV2["Service"];
   readonly textGeneration: ProviderTextGeneration;
+  /** Server-only process configuration; never part of a provider snapshot. */
+  readonly terminalLaunch?: () => Effect.Effect<
+    {
+      readonly command: string;
+      readonly args: ReadonlyArray<string>;
+      readonly env: NodeJS.ProcessEnv;
+    },
+    ProviderDriverError
+  >;
   readonly auth?: ProviderAuthController;
   readonly acpSessionManagement?: {
     readonly listSessions: (input: {

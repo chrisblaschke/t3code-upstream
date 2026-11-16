@@ -26,7 +26,19 @@ export const TerminalThreadInput = Schema.Struct({
 });
 export type TerminalThreadInput = typeof TerminalThreadInput.Type;
 
-// Terminal ids are client-chosen; the server never allocates them.
+export const TerminalOpenPiInput = TerminalThreadInput;
+export type TerminalOpenPiInput = typeof TerminalOpenPiInput.Type;
+
+export class TerminalPiSessionError extends Schema.TaggedError<TerminalPiSessionError>()(
+  "TerminalPiSessionError",
+  { threadId: Schema.String },
+) {
+  override get message() {
+    return "Could not open the thread's Pi session.";
+  }
+}
+
+// Ordinary terminals use client-chosen ids; Pi session launches allocate an id on the server.
 const TerminalSessionInput = Schema.Struct({
   ...TerminalThreadInput.fields,
   terminalId: TerminalIdSchema,
@@ -365,6 +377,7 @@ export class TerminalResizeError extends Schema.TaggedError<TerminalResizeError>
 }
 
 export const TerminalError = Schema.Union([
+  TerminalPiSessionError,
   TerminalCwdError,
   TerminalHistoryError,
   TerminalSessionLookupError,

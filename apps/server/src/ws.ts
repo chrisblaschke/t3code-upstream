@@ -188,6 +188,7 @@ import { invalidateSettingsSecrets } from "./sourceControl/sourceControlHostSecr
 import * as DatabaseStorage from "./persistence/DatabaseStorage.ts";
 import * as StorageCleanup from "./storageCleanup.ts";
 import * as TerminalManager from "./terminal/Manager.ts";
+import { openPiTerminal } from "./terminal/PiTui.ts";
 import { terminalOutputStream, withOutputWindow } from "./terminal/OutputProtocol.ts";
 import * as ServerBrowser from "./preview/ServerBrowser.ts";
 import * as DeviceService from "./device/DeviceService.ts";
@@ -3107,6 +3108,19 @@ export const layerWsRpc = (
         [WS_METHODS.reviewGetDiffPreview]: (input) => review.getDiffPreview(input),
         [WS_METHODS.reviewGetDiffFileContents]: (input) => review.getDiffFileContents(input),
         [WS_METHODS.terminalOpen]: (input) => terminalManager.open(input),
+        [WS_METHODS.terminalOpenPi]: (input) =>
+          openPiTerminal(input).pipe(
+            Effect.provideService(
+              ThreadManagementService.ThreadManagementService,
+              threadManagement,
+            ),
+            Effect.provideService(ProjectStore.ProjectStoreV2, projectStore),
+            Effect.provideService(
+              ProviderInstanceRegistry.ProviderInstanceRegistry,
+              providerInstances,
+            ),
+            Effect.provideService(TerminalManager.TerminalManager, terminalManager),
+          ),
         [WS_METHODS.terminalAttach]: (input, metadata) =>
           terminalManager.attachOutputStream(input, terminalViewerId(metadata)),
         [WS_METHODS.terminalWrite]: (input) => terminalManager.write(input),

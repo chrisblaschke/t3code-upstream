@@ -11,6 +11,7 @@ import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 import * as ProviderLatestVersions from "@t3tools/provider-core/server/ProviderLatestVersions";
 import * as ProviderHost from "@t3tools/provider-core/server/ProviderHost";
 import { piUsageReader } from "./usage.ts";
+import { resolvePiTerminalLaunch } from "./launch.ts";
 import { makePiTextGeneration } from "./textGeneration.ts";
 import { PiAdapterV2Driver, type PiAdapterV2DriverEnv } from "./adapter.ts";
 import { ProviderDriverError } from "@t3tools/provider-core/server/errors";
@@ -214,6 +215,17 @@ export const PiDriver: ProviderDriver<PiSettings, PiDriverEnv, Path.Path> = {
             ),
       orchestrationAdapter,
       textGeneration,
+      terminalLaunch: () =>
+        resolvePiTerminalLaunch({ config: effectiveConfig, environment }).pipe(
+          Effect.mapError(
+            () =>
+              new ProviderDriverError({
+                driver: DRIVER_KIND,
+                instanceId,
+                detail: "Invalid Pi launch configuration.",
+              }),
+          ),
+        ),
     } satisfies ProviderInstance;
   }),
 };

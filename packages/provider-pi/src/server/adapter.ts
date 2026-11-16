@@ -4,6 +4,7 @@ import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
 import * as NodeUtil from "node:util";
 import * as HostProcess from "@t3tools/shared/HostProcess";
+import { resolvePiCommand } from "./launch.ts";
 import { AgentScope } from "@t3tools/shared/AgentScope";
 import { getModelSelectionStringOptionValue } from "@t3tools/shared/model";
 import { readToolOutputImage } from "@t3tools/shared/toolOutput";
@@ -81,7 +82,6 @@ import {
   buildPiRpcLaunch,
   materializePiT3McpExtension,
   resolvePiAgentDir,
-  resolvePiLaunchArgs,
 } from "./mcpInjection.ts";
 import {
   PI_FILE_CHANGE_TOOLS,
@@ -553,20 +553,20 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
       const extensionPath = yield* provideCacheFs(
         materializePiT3McpExtension(host.paths.providerStatusCacheDir),
       );
-      const resolvedLaunchArgs = resolvePiLaunchArgs(options.settings.launchArgs);
-      if (!resolvedLaunchArgs.ok) {
-        return yield* protocolError(resolvedLaunchArgs.message);
+      const resolvedCommand = resolvePiCommand(options.settings);
+      if (!resolvedCommand.ok) {
+        return yield* protocolError(resolvedCommand.message);
       }
       const rollbackNonce = yield* Effect.sync(() => NodeCrypto.randomUUID());
       const launch = buildPiRpcLaunch({
-        launchArgs: resolvedLaunchArgs.args,
+        launchArgs: resolvedCommand.args,
         environment: options.environment,
         mcpSession,
         extensionPath,
         runtimeMode: input.runtimePolicy.runtimeMode,
       });
       const scopedLaunch = yield* agentScope.wrap({
-        command: options.settings.binaryPath || "pi",
+        command: resolvedCommand.command,
         args: launch.args,
         name: "pi",
         threadId: input.threadId,
@@ -689,10 +689,10 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
       // A resumed get_state model may be a previous explicit selection.
       let baselineModel: { provider: string; modelId: string } | null = null;
       let baselineThinking: string | null = null;
-      const hasLaunchModel = resolvedLaunchArgs.args.some(
+      const hasLaunchModel = resolvedCommand.args.some(
         (arg) => arg === "--model" || arg === "--provider",
       );
-      const hasLaunchThinking = resolvedLaunchArgs.args.includes("--thinking");
+      const hasLaunchThinking = resolvedCommand.args.includes("--thinking");
       // Capture Pi's resolved launch choice before switch_session can replace it
       // with a saved model. CLI patterns and thinking suffixes are not RPC IDs.
       let launchModel: { provider: string; modelId: string } | null = null;
@@ -4036,7 +4036,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
             // user extensions or model prompts; only the T3 bridge is loaded when a bang
             // boundary needs native fork-at.
             const forkLaunch = buildPiRpcLaunch({
-              launchArgs: resolvedLaunchArgs.args,
+              launchArgs: resolvedCommand.args,
               environment: options.environment,
               mcpSession: undefined,
               extensionPath: undefined,

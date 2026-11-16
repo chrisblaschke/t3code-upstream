@@ -135,6 +135,7 @@ describe("command permissions", () => {
 
   it.effect.each([
     { method: WS_METHODS.shellOpenExternalTerminal, scope: AuthTerminalOperateScope },
+    { method: WS_METHODS.terminalOpenPi, scope: AuthTerminalOperateScope },
   ] as const)("checks fork RPC $method before execution", ({ method, scope }) =>
     Effect.scoped(
       Effect.gen(function* () {

@@ -21,6 +21,7 @@ import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as Logger from "effect/Logger";
 import * as Option from "effect/Option";
 import * as PlatformError from "effect/PlatformError";
 import * as Path from "effect/Path";
@@ -31,7 +32,9 @@ import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 import * as SynchronizedRef from "effect/SynchronizedRef";
 import * as TestClock from "effect/testing/TestClock";
+import * as Tracer from "effect/Tracer";
 import { expect, vi } from "vite-plus/test";
+import * as NodeUtil from "node:util";
 
 import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
 import * as ProcessRunner from "../processRunner.ts";
@@ -787,6 +790,85 @@ it.layer(
           true,
         ]);
       }),
+  );
+
+  it.effect(
+    "keeps a direct Pi process alive on settlement and never relaunches it from an ordinary open",
+    () =>
+      Effect.gen(function* () {
+        const { manager, ptyAdapter, baseDir } = yield* createManager(5, {
+          subprocessInspector: () =>
+            Effect.succeed({ hasRunningSubprocess: false, childCommand: null, processIds: [] }),
+        });
+        const result = yield* manager.openProcess(openInput(), {
+          command: "custom-pi",
+          args: ["--session", "/s.jsonl"],
+          env: { API_KEY: "synthetic-secret" },
+        });
+        const reopened = yield* manager.open(
+          openInput({ terminalId: result.terminalId, cwd: baseDir, env: { EXTRA: "1" } }),
+        );
+        assert.equal(reopened.cwd, result.cwd);
+        assert.equal(reopened.pid, result.pid);
+        expect(ptyAdapter.spawnInputs).toHaveLength(1);
+        const exited = yield* Deferred.make<void>();
+        const unsubscribe = yield* manager.subscribe((event) =>
+          event.type === "exited"
+            ? Deferred.succeed(exited, undefined).pipe(Effect.asVoid)
+            : Effect.void,
+        );
+        yield* Effect.addFinalizer(() => Effect.sync(unsubscribe));
+        ptyAdapter.processes[0]!.emitExit({ exitCode: 0, signal: 0 });
+        yield* Deferred.await(exited);
+        const afterExit = yield* manager.open(
+          openInput({ terminalId: result.terminalId, cwd: baseDir }),
+        );
+        assert.equal(afterExit.status, "exited");
+        expect(ptyAdapter.spawnInputs).toHaveLength(1);
+
+        const other = yield* manager.openProcess(openInput({ terminalId: "other" }), {
+          command: "custom-pi",
+          args: [],
+          env: {},
+        });
+        yield* manager.closeOnSettle({ threadId: "thread-1" });
+        assert.equal(other.status, "running");
+        assert.isFalse(ptyAdapter.processes[1]!.killed);
+      }),
+  );
+
+  it.effect("keeps Pi launch arguments and spawn causes out of results, logs and traces", () =>
+    Effect.gen(function* () {
+      const { manager, ptyAdapter, getEvents } = yield* createManager();
+      const spans: Array<Tracer.NativeSpan> = [];
+      const tracer = Tracer.make({
+        span: (options) => {
+          const span = new Tracer.NativeSpan(options);
+          spans.push(span);
+          return span;
+        },
+      });
+      const logs: unknown[] = [];
+      const logger = Logger.make(({ message }) => {
+        logs.push(message);
+      });
+      ptyAdapter.spawnFailures.push(new Error("ENOENT synthetic-cause"));
+      const failed = yield* manager
+        .openProcess(openInput({ terminalId: "failed" }), {
+          command: "custom-pi",
+          args: ["--api-key", "synthetic-secret", "--session", "/s.jsonl"],
+          env: {},
+        })
+        .pipe(
+          Effect.provide(Logger.layer([logger], { mergeWithExisting: false })),
+          Effect.provideService(Tracer.Tracer, tracer),
+        );
+      assert.equal(failed.status, "error");
+      const seen = NodeUtil.inspect([failed, yield* getEvents, logs, spans], { depth: 12 });
+      assert.include(seen, "terminal.trySpawn");
+      assert.notInclude(seen, "synthetic-cause");
+      assert.notInclude(seen, "synthetic-secret");
+    }),
   );
 
   it.effect("labels a running command by its whole process name, spaces included", () =>

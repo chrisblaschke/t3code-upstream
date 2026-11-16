@@ -1,6 +1,7 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
 import { DEFAULT_SERVER_SETTINGS, ProviderInstanceId } from "@t3tools/contracts";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -124,6 +125,36 @@ const create = (config: Partial<PiSettings> = {}, enabled = true) =>
   });
 
 it.layer(layerTest)("PiDriver workspace discovery", (it) => {
+  it.effect("uses the instance environment and CLI configuration for its terminal launch", () =>
+    Effect.gen(function* () {
+      const { spawner } = yield* makePiSpawner();
+      const instance = yield* PiDriver.create({
+        instanceId: ProviderInstanceId.make("pi-work"),
+        displayName: undefined,
+        enabled: true,
+        config: {
+          ...PiDriver.defaultConfig(),
+          binaryPath: "/opt/work/pi",
+          launchArgs: '--extension "work tools.ts"',
+        },
+        environment: [
+          { name: "PI_CODING_AGENT_DIR", value: "/profiles/work", sensitive: false },
+          { name: "API_KEY", value: "test-only-credential", sensitive: true },
+        ],
+      }).pipe(Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner));
+      const launch = yield* instance.terminalLaunch!();
+      assert.equal(launch.command, "/opt/work/pi");
+      assert.deepEqual(launch.args, ["--extension", "work tools.ts"]);
+      assert.equal(launch.env.PI_CODING_AGENT_DIR, "/profiles/work");
+      assert.equal(launch.env.API_KEY, "test-only-credential");
+      assert.equal(launch.env.INHERITED, "yes");
+      assert.notInclude(
+        JSON.stringify(yield* instance.snapshot.getSnapshot),
+        "test-only-credential",
+      );
+    }).pipe(Effect.scoped, Effect.provideService(HostProcess.Environment, { INHERITED: "yes" })),
+  );
+
   it.effect("keeps each workspace's skills and commands separate from the machine catalog", () =>
     Effect.gen(function* () {
       const { spawner, launches } = yield* makePiSpawner();

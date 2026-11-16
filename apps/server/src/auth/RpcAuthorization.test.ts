@@ -58,6 +58,7 @@ describe("RPC authorization scopes", () => {
     for (const method of [
       WS_METHODS.terminalAttach,
       WS_METHODS.terminalOpen,
+      WS_METHODS.terminalOpenPi,
       WS_METHODS.terminalWrite,
       WS_METHODS.terminalResize,
       WS_METHODS.terminalClear,
@@ -294,6 +295,34 @@ describe("settings mutation authorization", () => {
     }).pipe(Effect.scoped),
   );
 });
+
+it.effect("denies Pi terminal launch before the handler without terminal operate permission", () =>
+  Effect.gen(function* () {
+    const group = WsRpcGroup.omit(
+      ...[...WsRpcGroup.requests.keys()].filter(
+        (tag): tag is Exclude<keyof typeof RPC_REQUIRED_SCOPES, typeof WS_METHODS.terminalOpenPi> =>
+          tag !== WS_METHODS.terminalOpenPi,
+      ),
+    );
+    let handled = false;
+    const client = yield* RpcTest.makeClient(group).pipe(
+      Effect.provide(
+        Layer.mergeAll(
+          group.toLayerHandler(WS_METHODS.terminalOpenPi, () =>
+            Effect.sync(() => {
+              handled = true;
+            }).pipe(Effect.andThen(Effect.never)),
+          ),
+          RpcAuthorization.layer([AuthTerminalReadScope]),
+        ),
+      ),
+    );
+    expect(
+      yield* client[WS_METHODS.terminalOpenPi]({ threadId: "thread" }).pipe(Effect.flip),
+    ).toMatchObject({ requiredPermission: AuthTerminalOperateScope });
+    expect(handled).toBe(false);
+  }).pipe(Effect.scoped),
+);
 
 it.effect("requires task permission before attaching a prepared worktree to a thread", () =>
   Effect.gen(function* () {
