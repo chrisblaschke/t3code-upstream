@@ -881,6 +881,38 @@ it.layer(
     }),
   );
 
+  it.effect("ignores credential suffixes arriving while close publishes a retained prefix", () =>
+    Effect.gen(function* () {
+      const { manager, ptyAdapter, logsDir, getEvents } = yield* createManager();
+      const secret = "literal-synthetic-credential";
+      const prefix = secret.slice(0, 9);
+      yield* manager.openProcess(openInput(), {
+        command: "pi",
+        args: [],
+        env: {},
+        redact: [secret],
+      });
+      const process = ptyAdapter.processes[0]!;
+      const unsubscribe = yield* manager.subscribe((event) =>
+        Effect.sync(() => {
+          if (event.type === "output" && event.data === prefix) {
+            process.emitData(`${secret.slice(prefix.length)}\n`);
+          }
+        }),
+      );
+      yield* Effect.addFinalizer(() => Effect.sync(unsubscribe));
+      process.emitData(prefix);
+      yield* manager.close({ threadId: "thread-1" });
+      expect(
+        (yield* getEvents)
+          .filter((event) => event.type === "output")
+          .map((event) => event.data)
+          .join(""),
+      ).toBe(prefix);
+      expect(yield* readFileString(yield* historyLogPath(logsDir))).toBe(prefix);
+    }),
+  );
+
   it.effect(
     "publishes complete Pi control sequences without holding their final credential prefix",
     () =>

@@ -2394,7 +2394,9 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
     const process = session.process;
     if (!process) return;
 
-    session.flushOutput?.();
+    const flushOutput = session.flushOutput;
+    cleanupProcessHandles(session);
+    flushOutput?.();
     yield* drainProcessEvents(session, process.pid);
 
     const updatedAt = yield* nowIso;
