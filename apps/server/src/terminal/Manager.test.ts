@@ -841,7 +841,12 @@ it.layer(
     Effect.gen(function* () {
       const { manager, ptyAdapter, logsDir, getEvents } = yield* createManager();
       const secret = "literal-synthetic-credential";
-      const launch = { command: "pi", args: [], env: { API_KEY: secret }, redact: [secret] };
+      const launch = {
+        command: "pi",
+        args: [],
+        env: { API_KEY: secret },
+        redact: [secret, `${secret}-long`],
+      };
       yield* manager.openProcess(openInput(), launch);
       const attached = yield* Ref.make<ReadonlyArray<TerminalAttachStreamEvent>>([]);
       const unsubscribe = yield* manager.attachStream(openInput(), (event) =>
@@ -850,9 +855,10 @@ it.layer(
       yield* Effect.addFinalizer(() => Effect.sync(unsubscribe));
       const process = ptyAdapter.processes[0]!;
       process.emitData(`whole=${secret}\nsplit=${secret.slice(0, 9)}`);
-      process.emitData(`${secret.slice(9)}\nlast\n`);
+      process.emitData(`${secret.slice(9)}\noverlap=${secret}`);
+      process.emitData("-long\nlast\n");
       yield* manager.close({ threadId: "thread-1" });
-      const expected = "whole=[REDACTED]\nsplit=[REDACTED]\nlast\n";
+      const expected = "whole=[REDACTED]\nsplit=[REDACTED]\noverlap=[REDACTED]\nlast\n";
       const live = (yield* getEvents)
         .filter((event) => event.type === "output")
         .map((event) => event.data)

@@ -550,12 +550,6 @@ function terminalOutputRedactor(secrets: ReadonlyArray<string>) {
       output += input.slice(index, next);
       index = next;
       if (index === input.length) break;
-      const match = values.find((value) => input.startsWith(value, index));
-      if (match) {
-        output += "[REDACTED]";
-        index += match.length;
-        continue;
-      }
       if (input.startsWith("\u001b[", index)) {
         const sequence = /^\u001b\[[0-?]*[ -/]*[@-~]/.exec(input.slice(index))?.[0];
         if (sequence) {
@@ -567,10 +561,17 @@ function terminalOutputRedactor(secrets: ReadonlyArray<string>) {
       const rest = input.slice(index);
       if (
         !flush &&
-        (values.some((value) => value.startsWith(rest)) || /^\u001b(?:\[[0-?]*[ -/]*)?$/.test(rest))
+        (values.some((value) => value.length > rest.length && value.startsWith(rest)) ||
+          /^\u001b(?:\[[0-?]*[ -/]*)?$/.test(rest))
       ) {
         pending = rest;
         break;
+      }
+      const match = values.find((value) => input.startsWith(value, index));
+      if (match) {
+        output += "[REDACTED]";
+        index += match.length;
+        continue;
       }
       output += input[index];
       index += 1;
