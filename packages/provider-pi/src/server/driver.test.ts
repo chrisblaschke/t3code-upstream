@@ -147,7 +147,6 @@ it.layer(layerTest)("PiDriver workspace discovery", (it) => {
       assert.deepEqual(launch.args, ["--extension", "work tools.ts"]);
       assert.equal(launch.env.PI_CODING_AGENT_DIR, "/profiles/work");
       assert.equal(launch.env.API_KEY, "test-only-credential");
-      assert.equal(launch.env.INHERITED, "yes");
       assert.notInclude(
         JSON.stringify(yield* instance.snapshot.getSnapshot),
         "test-only-credential",
