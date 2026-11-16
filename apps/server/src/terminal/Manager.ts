@@ -2425,7 +2425,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
     });
     yield* startKillEscalation(process, session.threadId, session.terminalId);
     yield* evictInactiveSessionsIfNeeded();
-  });
+  }, Effect.uninterruptible);
 
   const trySpawn = Effect.fn("terminal.trySpawn")(function* (
     shellCandidates: ReadonlyArray<ShellCandidate>,

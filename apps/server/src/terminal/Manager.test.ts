@@ -913,43 +913,61 @@ it.layer(
     }),
   );
 
-  it.effect("finishes an in-flight output drain before close", () =>
-    Effect.gen(function* () {
-      const { manager, ptyAdapter, logsDir } = yield* createManager();
-      yield* manager.open(openInput());
-      const entered = yield* Deferred.make<void>();
-      const release = yield* Deferred.make<void>();
-      const firstDelivered = yield* Deferred.make<void>();
-      yield* Effect.addFinalizer(() => Deferred.succeed(release, undefined));
-      const output: Array<{ data: string; sequence: number }> = [];
-      const unsubscribe = yield* manager.subscribe((event) =>
-        Effect.gen(function* () {
-          if (event.type !== "output") return;
-          if (event.data === "first\n") {
-            yield* Deferred.succeed(entered, undefined);
-            yield* Deferred.await(release);
-          }
-          assert.isDefined(event.sequence);
-          output.push({ data: event.data, sequence: event.sequence });
-          if (event.data === "first\n") yield* Deferred.succeed(firstDelivered, undefined);
-        }),
-      );
-      yield* Effect.addFinalizer(() => Effect.sync(unsubscribe));
-      const process = ptyAdapter.processes[0]!;
-      process.emitData("first\n");
-      yield* Deferred.await(entered);
-      process.emitData("second\n");
-      const stopped = yield* manager
-        .close(openInput())
-        .pipe(Effect.forkChild({ startImmediately: true }));
-      yield* Deferred.succeed(release, undefined);
-      yield* Fiber.join(stopped);
-      yield* Deferred.await(firstDelivered);
-      expect(output.map((event) => event.data)).toEqual(["first\n", "second\n"]);
-      expect(output[0]!.sequence).toBeLessThan(output[1]!.sequence);
-      yield* manager.close({ threadId: "thread-1" });
-      expect(yield* readFileString(yield* historyLogPath(logsDir))).toBe("first\nsecond\n");
-    }),
+  it.effect.each([false, true])(
+    "finishes an in-flight output drain before close (interrupted: %s)",
+    (interruptClose) =>
+      Effect.gen(function* () {
+        const { manager, ptyAdapter, logsDir } = yield* createManager();
+        yield* manager.open(openInput());
+        const entered = yield* Deferred.make<void>();
+        const release = yield* Deferred.make<void>();
+        const firstDelivered = yield* Deferred.make<void>();
+        yield* Effect.addFinalizer(() => Deferred.succeed(release, undefined));
+        const output: Array<{ data: string; sequence: number }> = [];
+        const unsubscribe = yield* manager.subscribe((event) =>
+          Effect.gen(function* () {
+            if (event.type !== "output") return;
+            if (event.data === "first\n") {
+              yield* Deferred.succeed(entered, undefined);
+              yield* Deferred.await(release);
+            }
+            assert.isDefined(event.sequence);
+            output.push({ data: event.data, sequence: event.sequence });
+            if (event.data === "first\n") yield* Deferred.succeed(firstDelivered, undefined);
+          }),
+        );
+        yield* Effect.addFinalizer(() => Effect.sync(unsubscribe));
+        const process = ptyAdapter.processes[0]!;
+        process.emitData("first\n");
+        yield* Deferred.await(entered);
+        process.emitData("second\n");
+        const killed = yield* Deferred.make<void>();
+        process.onKill = () => {
+          Deferred.doneUnsafe(killed, Effect.void);
+        };
+        const stopped = yield* manager
+          .close(openInput())
+          .pipe(Effect.forkChild({ startImmediately: true }));
+        expect(process.exitListenerCount).toBe(0);
+        const interrupted = interruptClose
+          ? yield* Fiber.interrupt(stopped).pipe(Effect.forkChild({ startImmediately: true }))
+          : undefined;
+        yield* Deferred.succeed(release, undefined);
+        if (interrupted) yield* Fiber.join(interrupted);
+        else yield* Fiber.join(stopped);
+        yield* Deferred.await(firstDelivered);
+        expect(output.map((event) => event.data)).toEqual(["first\n", "second\n"]);
+        expect(output[0]!.sequence).toBeLessThan(output[1]!.sequence);
+        if (!interruptClose) {
+          yield* manager.close({ threadId: "thread-1" });
+          expect(yield* readFileString(yield* historyLogPath(logsDir))).toBe("first\nsecond\n");
+        }
+        yield* manager.open(openInput());
+        expect(ptyAdapter.processes).toHaveLength(2);
+        yield* Deferred.await(killed);
+        expect(process.killed).toBe(true);
+        yield* manager.close({ threadId: "thread-1" });
+      }),
   );
 
   it.effect(
