@@ -856,9 +856,10 @@ it.layer(
       const process = ptyAdapter.processes[0]!;
       process.emitData(`whole=${secret}\nsplit=${secret.slice(0, 9)}`);
       process.emitData(`${secret.slice(9)}\noverlap=${secret}`);
-      process.emitData("-long\nlast\n");
+      process.emitData("-long\nlast\nordinary final");
       yield* manager.close({ threadId: "thread-1" });
-      const expected = "whole=[REDACTED]\nsplit=[REDACTED]\noverlap=[REDACTED]\nlast\n";
+      const expected =
+        "whole=[REDACTED]\nsplit=[REDACTED]\noverlap=[REDACTED]\nlast\nordinary final";
       const live = (yield* getEvents)
         .filter((event) => event.type === "output")
         .map((event) => event.data)

@@ -316,6 +316,7 @@ interface TerminalSessionState {
   shell: string | null;
   unsubscribeData: (() => void) | null;
   unsubscribeExit: (() => void) | null;
+  flushOutput?: () => boolean;
   hasRunningSubprocess: boolean;
   childCommandLabel: string | null;
   runtimeEnv: Record<string, string> | null;
@@ -506,6 +507,7 @@ function cleanupProcessHandles(session: TerminalSessionState): void {
   session.unsubscribeData = null;
   session.unsubscribeExit?.();
   session.unsubscribeExit = null;
+  delete session.flushOutput;
 }
 
 function enqueueProcessEvent(
@@ -2393,6 +2395,9 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
     const process = session.process;
     if (!process) return;
 
+    session.flushOutput?.();
+    yield* drainProcessEvents(session, process.pid);
+
     const updatedAt = yield* nowIso;
     yield* modifyManagerState((state) => {
       cleanupProcessHandles(session);
@@ -2594,11 +2599,14 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
                 }
                 if (eventsActivated) runFork(drainProcessEvents(session, processPid));
               });
-              session.unsubscribeExit = spawnResult.process.onExit((event) => {
+              session.flushOutput = () => {
                 const data = redact("", true);
-                const outputQueued = data
+                return data
                   ? enqueueProcessEvent(session, processPid, { type: "output", data })
                   : false;
+              };
+              session.unsubscribeExit = spawnResult.process.onExit((event) => {
+                const outputQueued = session.flushOutput?.() ?? false;
                 const exitQueued = enqueueProcessEvent(session, processPid, {
                   type: "exit",
                   event,
@@ -2679,8 +2687,6 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
   ) {
     const key = toSessionKey(threadId, terminalId);
     const session = yield* getSession(threadId, terminalId);
-    const closedEventSequence = Option.isSome(session) ? session.value.eventSequence + 1 : 0;
-
     if (Option.isSome(session)) {
       yield* stopProcess(session.value);
       yield* unregisterTerminal({ threadId, terminalId });
@@ -2688,6 +2694,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
     }
 
     yield* flushPersist(threadId, terminalId);
+    const closedEventSequence = Option.isSome(session) ? session.value.eventSequence + 1 : 0;
 
     const removed = yield* modifyManagerState((state) => {
       closedSessionKeys.add(key);
